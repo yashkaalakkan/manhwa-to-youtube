@@ -246,7 +246,8 @@ def main():
 
     # Update manifest with panel info
     with open(manifest_path) as f:
-        manifest = json.load(f)    manifest["panels"] = [
+        manifest = json.load(f)
+    manifest["panels"] = [
         {"index": i + 1, "path": str(p), "original_name": p.name}
         for i, p in enumerate(all_panels)
     ]
