@@ -121,7 +121,7 @@ Rules:
 - Tags: 20 tags — broad (manhwa, anime, webtoon), specific (title, episode), format tags
 
 JSON only, no markdown:
-{{"title":"...","description":"...","tags":[...]}}}"""
+{{"title":"...","description":"...","tags":[...]}}}}"""
 
     raw = groq_call(client, prompt, max_tokens=600)
     raw = raw.replace("```json", "").replace("```", "").strip()
