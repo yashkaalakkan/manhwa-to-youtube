@@ -1,13 +1,13 @@
 """
 generate_script.py
 Generates narration scripts and SEO metadata via Groq.
-Always produces exactly 4 shorts per episode (pages split evenly).
+Narration is strict THIRD-PERSON — an external narrator describes the story.
 Loads per-series memory for narrative continuity across episodes.
-Updates and saves memory after generation.
 """
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -17,7 +17,6 @@ from typing import List
 
 from groq import Groq
 
-# Add src to path so memory.py is importable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.memory import load_memory, save_memory, build_context_prompt, update_memory
 
@@ -31,7 +30,6 @@ WORDS_PER_SHORT  = int((TARGET_SHORT_S - COVER_S) * WORDS_PER_SEC)   # ~130 word
 
 
 def panels_per_short_dynamic() -> int:
-    """Same formula as build_shorts.ideal_panels_per_short() — kept in sync."""
     return max(1, int((TARGET_SHORT_S - COVER_S) / MIN_PANEL_S))
 
 
@@ -55,7 +53,6 @@ def split_evenly(pages: List[dict], n: int) -> List[List[dict]]:
 
 
 def groq_call(client: Groq, prompt: str, max_tokens: int = 500, retries: int = 6) -> str:
-    """Groq call with exponential backoff on rate limit."""
     delay = INTER_CALL_S
     for attempt in range(1, retries + 1):
         try:
@@ -92,7 +89,25 @@ def narrate(client, pages, manhwa, episode, part, language, memory_context="", i
     ctx  = "full episode" if is_full else f"part {part} short (under 60s)"
     lang = f"Respond in {language}." if language != "en" else "Respond in English."
 
-    prompt = f"""{memory_context}You are a professional manhwa narrator.
+    # ── THIRD-PERSON NARRATOR RULES ─────────────────────────────────────────
+    # The narrator is an omniscient outside observer — never "I" / "we" / "you".
+    # Describes characters by name or "he/she/they".
+    # Shares character thoughts in reported speech: "Lloyd wonders if..." not "I wonder..."
+    # Example style: "Lloyd tries to recall how he arrived here, but his memory
+    #   is a blank. Then a sound — footsteps. He turns to find a stranger watching
+    #   him, someone who somehow knows his name..."
+    prompt = f"""{memory_context}You are a professional third-person manhwa narrator.
+Your voice is like a documentary storyteller — calm, cinematic, immersive.
+
+STRICT RULES:
+- ALWAYS third-person: use character names and he/she/they — NEVER "I", "me", "we", "you"
+- Describe what characters do, see, feel, and think from the OUTSIDE
+- Reported thoughts: write "Lloyd wonders..." not "I wonder..."
+- Add "..." only for genuine dramatic pauses — max 2 per narration
+- SHORT: max {WORDS_PER_SHORT} words, end on a hook that makes viewers want part 2
+- FULL: continuous flowing narration, no cuts, no part labels
+- Use memory context for continuity — do NOT re-introduce characters already known
+- Output ONLY the narration text. No labels, no preamble.
 
 Manhwa: "{manhwa}" | Episode: {episode} | Type: {ctx}
 {lang}
@@ -100,20 +115,12 @@ Manhwa: "{manhwa}" | Episode: {episode} | Type: {ctx}
 PANEL TEXT:
 {text}
 
-Rules:
-- Smooth, natural spoken narration only
-- Add "..." for dramatic pauses
-- SHORT: end with a cliffhanger hook, max 130 words
-- FULL: continuous narration, no cuts
-- Use series context above for continuity — don't re-introduce known characters
-- Output ONLY the narration. No labels.
-
 NARRATION:"""
 
     narration = groq_call(client, prompt, max_tokens=400)
     words     = narration.split()
     return {
-        "narration": narration,
+        "narration":          narration,
         "estimated_duration": round(len(words) / WORDS_PER_SEC, 1),
     }
 
@@ -140,22 +147,21 @@ JSON only, no markdown:
     except json.JSONDecodeError:
         pt = f" Part {part}" if part else ""
         return {
-            "title": f"{manhwa} Episode {episode}{pt} | Manhwa #Shorts",
+            "title":       f"{manhwa} Episode {episode}{pt} | Manhwa #Shorts",
             "description": f"Watch {manhwa} Ep {episode}{pt}!\n\n#manhwa #anime #webtoon",
-            "tags": [manhwa, "manhwa", "anime", "webtoon", f"episode{episode}", "shorts"],
+            "tags":        [manhwa, "manhwa", "anime", "webtoon", f"episode{episode}", "shorts"],
         }
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--raw-text",        required=True)
-    parser.add_argument("--manhwa",          required=True)
-    parser.add_argument("--episode",         required=True, type=int)
-    parser.add_argument("--language",        default="en")
-    # both ignored — shorts count is computed dynamically from panel count
+    parser.add_argument("--raw-text",         required=True)
+    parser.add_argument("--manhwa",           required=True)
+    parser.add_argument("--episode",          required=True, type=int)
+    parser.add_argument("--language",         default="en")
     parser.add_argument("--panels-per-short", default="auto")
     parser.add_argument("--pages-per-short",  default="auto")
-    parser.add_argument("--output",          required=True)
+    parser.add_argument("--output",           required=True)
     args = parser.parse_args()
 
     out = Path(args.output)
@@ -165,50 +171,47 @@ def main():
         pages = json.load(f)
 
     # ── Load series memory ─────────────────────────────────────────────────
-    memory          = load_memory(args.manhwa)
-    memory_context  = build_context_prompt(memory)
+    memory         = load_memory(args.manhwa)
+    memory_context = build_context_prompt(memory)
     if memory_context:
         print(f"[Script] Series memory loaded — continuing from ep {memory['episodes_done']}")
     else:
         print(f"[Script] No prior memory — this is episode 1")
 
     client = build_client()
-    # Compute number of shorts dynamically from panel count — no hardcoding.
-    # Mirror build_shorts.py's manifest logic exactly so both scripts always
-    # agree on the number of shorts (fixes the "extra shorts skipped" bug).
-    import math
+
+    # Mirror build_shorts.py manifest logic exactly — same panel count, same shorts count
     manifest_path = Path("pipeline/manifest.json")
     if manifest_path.exists():
         with open(manifest_path) as mf:
             mfdata = json.load(mf)
         if mfdata.get("use_panels") and mfdata.get("panels"):
-            # Panel-split mode: each sub-panel counts as one unit
             n_panels = len(mfdata["panels"])
         else:
-            # Page mode: only count non-skipped pages (same as build_shorts.py)
-            skip = set(mfdata.get("skip_pages", []))
+            skip     = set(mfdata.get("skip_pages", []))
             n_panels = len([p for p in mfdata.get("pages", []) if p["index"] not in skip])
     else:
         n_panels = len(pages)
-    pps        = panels_per_short_dynamic()   # e.g. 34 for 55s target
+
+    pps        = panels_per_short_dynamic()
     num_shorts = max(1, math.ceil(n_panels / pps))
     chunks     = split_evenly(pages, num_shorts)
-    print(f"[Script] {len(pages)} pages | {n_panels} panels → {num_shorts} shorts (~{pps} panels/short, targeting {TARGET_SHORT_S}s each)")
-    print(f"[Script] Inter-call delay: {INTER_CALL_S}s")
+    print(f"[Script] {len(pages)} pages | {n_panels} panels → {num_shorts} shorts (~{pps} panels/short)")
+    print(f"[Script] Narrator: strict third-person | Inter-call delay: {INTER_CALL_S}s")
 
     result = {
-        "manhwa":       args.manhwa,
-        "episode":      args.episode,
-        "language":     args.language,
-        "total_parts":  len(chunks),
-        "shorts":       [],
+        "manhwa":      args.manhwa,
+        "episode":     args.episode,
+        "language":    args.language,
+        "total_parts": len(chunks),
+        "shorts":      [],
         "full_episode": None,
     }
 
-    # ── Generate 4 shorts ─────────────────────────────────────────────────
+    # ── Shorts ────────────────────────────────────────────────────────────
     for i, chunk in enumerate(chunks, start=1):
         print(f"\n[Script] Short {i}/{len(chunks)}: pages {chunk[0]['page_index']}–{chunk[-1]['page_index']}")
-        nar = narrate(client, chunk, args.manhwa, args.episode, i, args.language, memory_context)
+        nar  = narrate(client, chunk, args.manhwa, args.episode, i, args.language, memory_context)
         time.sleep(INTER_CALL_S)
         meta = metadata(client, args.manhwa, args.episode, i, nar["narration"], args.language, memory_context)
         time.sleep(INTER_CALL_S)
@@ -234,12 +237,10 @@ def main():
             full_parts.append(nd["narration"])
         time.sleep(INTER_CALL_S)
 
-    # Join chunks with a single space and normalise whitespace so proportional
-    # timestamp distribution and TTS don't accumulate drift at seam points.
+    # Normalise join — no double-spaces, no blank chunks
     combined = " ".join(part.strip() for part in full_parts if part.strip())
-    # Collapse any double-spaces that crept in from chunk boundaries
-    import re as _re
-    combined = _re.sub(r" {2,}", " ", combined).strip()
+    combined = re.sub(r" {2,}", " ", combined).strip()
+
     full_meta = metadata(client, args.manhwa, args.episode, None,
                          combined[:250], args.language, memory_context)
     time.sleep(INTER_CALL_S)

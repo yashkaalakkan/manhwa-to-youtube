@@ -12,8 +12,28 @@ on:
         required: true
         type: string
       drive_file_link:
-        description: "Public Google Drive link to the episode PDF"
+        description: "Public Google Drive link — Chapter 1 (required)"
         required: true
+        type: string
+      drive_file_link_2:
+        description: "Chapter 2 Drive link (optional)"
+        required: false
+        default: ""
+        type: string
+      drive_file_link_3:
+        description: "Chapter 3 Drive link (optional)"
+        required: false
+        default: ""
+        type: string
+      drive_file_link_4:
+        description: "Chapter 4 Drive link (optional)"
+        required: false
+        default: ""
+        type: string
+      drive_file_link_5:
+        description: "Chapter 5 Drive link (optional)"
+        required: false
+        default: ""
         type: string
       cover_image_link:
         description: "Public Drive link for cover image (optional)"
@@ -42,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 340
     permissions:
-      contents: write   # needed to commit memory file back
+      contents: write
 
     steps:
       - name: ⬇️ Checkout repository
@@ -87,35 +107,84 @@ jobs:
             https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
           echo "Kokoro models ready ✅"
 
-      - name: ⬇️ Download episode PDF + convert to images
+      # ── Process each chapter separately ─────────────────────────────────
+      # Chapter 1 is always required; chapters 2-5 are optional.
+      # Each chapter becomes: N shorts + 1 full-episode video.
+      # Every 5 shorts across all chapters are compiled into 1 landscape video.
+
+      - name: 🎬 Process Chapter 1
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
         run: |
-          python src/utils/drive_downloader.py \
-            --file-link "${{ github.event.inputs.drive_file_link }}" \
-            --output-dir ./episode_pages \
-            --cover-link "${{ github.event.inputs.cover_image_link }}" \
-            --skip-pages "${{ github.event.inputs.skip_pages }}" \
-            --dpi 150
+          bash .github/scripts/process_chapter.sh \
+            "${{ github.event.inputs.manhwa_name }}" \
+            "${{ github.event.inputs.episode_number }}" \
+            "1" \
+            "${{ github.event.inputs.drive_file_link }}" \
+            "${{ github.event.inputs.cover_image_link }}" \
+            "${{ github.event.inputs.language }}" \
+            "${{ github.event.inputs.skip_pages }}"
 
-      - name: 🔍 OCR — Extract text from manga panels
-        run: |
-          python src/ocr/extract_text.py \
-            --pages-dir ./episode_pages \
-            --output ./pipeline/raw_text.json \
-            --language "${{ github.event.inputs.language }}" \
-            --skip-pages "${{ github.event.inputs.skip_pages }}"
-
-      - name: 🤖 Generate narration scripts via Groq
+      - name: 🎬 Process Chapter 2
+        if: ${{ github.event.inputs.drive_file_link_2 != '' }}
         env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
         run: |
-          python src/script/generate_script.py \
-            --raw-text ./pipeline/raw_text.json \
-            --manhwa "${{ github.event.inputs.manhwa_name }}" \
-            --episode "${{ github.event.inputs.episode_number }}" \
-            --language "${{ github.event.inputs.language }}" \
-            --output ./pipeline/scripts.json
+          bash .github/scripts/process_chapter.sh \
+            "${{ github.event.inputs.manhwa_name }}" \
+            "${{ github.event.inputs.episode_number }}" \
+            "2" \
+            "${{ github.event.inputs.drive_file_link_2 }}" \
+            "${{ github.event.inputs.cover_image_link }}" \
+            "${{ github.event.inputs.language }}" \
+            "${{ github.event.inputs.skip_pages }}"
+
+      - name: 🎬 Process Chapter 3
+        if: ${{ github.event.inputs.drive_file_link_3 != '' }}
+        env:
+          GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
+        run: |
+          bash .github/scripts/process_chapter.sh \
+            "${{ github.event.inputs.manhwa_name }}" \
+            "${{ github.event.inputs.episode_number }}" \
+            "3" \
+            "${{ github.event.inputs.drive_file_link_3 }}" \
+            "${{ github.event.inputs.cover_image_link }}" \
+            "${{ github.event.inputs.language }}" \
+            "${{ github.event.inputs.skip_pages }}"
+
+      - name: 🎬 Process Chapter 4
+        if: ${{ github.event.inputs.drive_file_link_4 != '' }}
+        env:
+          GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
+        run: |
+          bash .github/scripts/process_chapter.sh \
+            "${{ github.event.inputs.manhwa_name }}" \
+            "${{ github.event.inputs.episode_number }}" \
+            "4" \
+            "${{ github.event.inputs.drive_file_link_4 }}" \
+            "${{ github.event.inputs.cover_image_link }}" \
+            "${{ github.event.inputs.language }}" \
+            "${{ github.event.inputs.skip_pages }}"
+
+      - name: 🎬 Process Chapter 5
+        if: ${{ github.event.inputs.drive_file_link_5 != '' }}
+        env:
+          GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
+        run: |
+          bash .github/scripts/process_chapter.sh \
+            "${{ github.event.inputs.manhwa_name }}" \
+            "${{ github.event.inputs.episode_number }}" \
+            "5" \
+            "${{ github.event.inputs.drive_file_link_5 }}" \
+            "${{ github.event.inputs.cover_image_link }}" \
+            "${{ github.event.inputs.language }}" \
+            "${{ github.event.inputs.skip_pages }}"
 
       - name: 💾 Commit series memory back to repo
         run: |
@@ -126,41 +195,13 @@ jobs:
             "🧠 Memory: ${{ github.event.inputs.manhwa_name }} ep${{ github.event.inputs.episode_number }}"
           git push
 
-      - name: 🎙️ Generate TTS audio via Kokoro
-        run: |
-          python src/tts/generate_audio.py \
-            --scripts ./pipeline/scripts.json \
-            --output-dir ./pipeline/audio \
-            --language "${{ github.event.inputs.language }}"
-
-      - name: 🎬 Build short videos
-        run: |
-          python src/video/build_shorts.py \
-            --pages-dir ./episode_pages \
-            --audio-dir ./pipeline/audio \
-            --scripts ./pipeline/scripts.json \
-            --output-dir ./output/shorts \
-            --manhwa "${{ github.event.inputs.manhwa_name }}" \
-            --episode "${{ github.event.inputs.episode_number }}" \
-
-
-      - name: 💾 Save shorts as artifact (early — so they're accessible even if later steps fail)
+      - name: 💾 Save shorts as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: shorts-ep${{ github.event.inputs.episode_number }}-preview
           path: output/shorts/
           retention-days: 3
-
-      - name: 🎬 Build full episode video
-        run: |
-          python src/video/build_full_episode.py \
-            --pages-dir ./episode_pages \
-            --audio-dir ./pipeline/audio \
-            --scripts ./pipeline/scripts.json \
-            --output ./output/full_episode.mp4 \
-            --manhwa "${{ github.event.inputs.manhwa_name }}" \
-            --episode "${{ github.event.inputs.episode_number }}"
 
       - name: 💾 Save all outputs as artifact
         uses: actions/upload-artifact@v4

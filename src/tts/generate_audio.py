@@ -3,6 +3,9 @@ generate_audio.py
 1. Generates TTS audio using Kokoro
 2. Runs WhisperX forced alignment for accurate word-level timestamps
    Falls back to proportional estimation if WhisperX fails.
+
+Key sync fix: WhisperX is run with condition_on_previous_text=False to prevent
+   timestamp drift across the audio file.
 """
 
 import argparse
@@ -55,6 +58,8 @@ def generate_tts(kokoro, narration: str, voice: str, output_path: Path) -> float
 def align_with_whisperx(audio_path: Path, narration: str, language: str) -> list[dict] | None:
     """
     Run WhisperX forced alignment for accurate word timestamps.
+    - Uses 'small' model for better accuracy than 'tiny'
+    - condition_on_previous_text=False prevents cumulative drift
     Returns list of {word, start, end} or None if alignment fails.
     """
     try:
@@ -64,11 +69,20 @@ def align_with_whisperx(audio_path: Path, narration: str, language: str) -> list
         device  = "cpu"
         compute = "int8"
 
-        print(f"    [WhisperX] Loading model...")
-        model = whisperx.load_model("tiny", device, compute_type=compute, language=language[:2])
+        print(f"    [WhisperX] Loading model (small, no drift mode)...")
+        model = whisperx.load_model(
+            "small", device, compute_type=compute, language=language[:2]
+        )
 
-        audio = whisperx.load_audio(str(audio_path))
-        result = model.transcribe(audio, batch_size=8, language=language[:2])
+        audio  = whisperx.load_audio(str(audio_path))
+        result = model.transcribe(
+            audio,
+            batch_size=8,
+            language=language[:2],
+            # Disable conditioning on previous text — this is the main cause
+            # of subtitle drift when WhisperX tries to "continue" context.
+            condition_on_previous_text=False,
+        )
 
         # Forced alignment
         model_a, metadata = whisperx.load_align_model(
@@ -76,7 +90,7 @@ def align_with_whisperx(audio_path: Path, narration: str, language: str) -> list
         )
         aligned = whisperx.align(
             result["segments"], model_a, metadata, audio, device,
-            return_char_alignments=False
+            return_char_alignments=False,
         )
 
         # Extract word-level timestamps
@@ -84,14 +98,16 @@ def align_with_whisperx(audio_path: Path, narration: str, language: str) -> list
         for seg in aligned.get("word_segments", []):
             w = seg.get("word", "").strip()
             if w:
-                words.append({
-                    "word":  re.sub(r"[^\w']", "", w),
-                    "start": round(seg.get("start", 0), 3),
-                    "end":   round(seg.get("end",   0), 3),
-                })
+                clean = re.sub(r"[^\w']", "", w)
+                if clean:
+                    words.append({
+                        "word":  clean,
+                        "start": round(seg.get("start", 0), 3),
+                        "end":   round(seg.get("end",   0), 3),
+                    })
 
         if words:
-            print(f"    [WhisperX] ✅ Aligned {len(words)} words")
+            print(f"    [WhisperX] ✅ Aligned {len(words)} words (drift-free)")
             return words
 
     except ImportError:
@@ -103,19 +119,17 @@ def align_with_whisperx(audio_path: Path, narration: str, language: str) -> list
 
 
 def proportional_timestamps(narration: str, duration: float) -> list[dict]:
-    """Fallback: distribute duration proportionally by word length.
-
-    Pause tokens ("...", "—", "–", ellipsis-heavy words) get extra weight so
-    captions don't race through dramatic beats when WhisperX is unavailable.
+    """
+    Fallback: distribute duration proportionally by word length.
+    Pause tokens ('...', '—', '–') get extra time so captions
+    don't race through dramatic beats.
     """
     words = re.findall(r"\S+", narration)
 
     def _weight(w: str) -> float:
-        # Count pause/ellipsis characters as ~1.5 letters each
-        letters   = len(re.sub(r"[^a-zA-Z]", "", w))
-        pauses    = w.count(".") + w.count("…") + w.count("—") + w.count("–")
-        raw       = letters + pauses * 1.5
-        return max(raw, 1.0)
+        letters = len(re.sub(r"[^a-zA-Z]", "", w))
+        pauses  = w.count(".") + w.count("…") + w.count("—") + w.count("–")
+        return max(letters + pauses * 1.5, 1.0)
 
     weights = [_weight(w) for w in words]
     total   = sum(weights)
@@ -123,11 +137,13 @@ def proportional_timestamps(narration: str, duration: float) -> list[dict]:
     cursor  = 0.0
     for word, weight in zip(words, weights):
         dur = (weight / total) * duration
-        result.append({
-            "word":  re.sub(r"[^\w']", "", word),
-            "start": round(cursor, 3),
-            "end":   round(cursor + dur, 3),
-        })
+        clean = re.sub(r"[^\w']", "", word)
+        if clean:
+            result.append({
+                "word":  clean,
+                "start": round(cursor, 3),
+                "end":   round(cursor + dur, 3),
+            })
         cursor += dur
     return result
 
@@ -140,7 +156,6 @@ def process_narration(kokoro, narration: str, voice: str, audio_path: Path, lang
     duration = generate_tts(kokoro, narration, voice, audio_path)
     print(f"    [TTS] {duration:.1f}s audio generated")
 
-    # Try WhisperX first, fall back to proportional
     words = align_with_whisperx(audio_path, narration, language)
     if words is None:
         words = proportional_timestamps(narration, duration)
@@ -171,10 +186,10 @@ def main():
     print(f"[TTS] Loading Kokoro...")
     kokoro = load_kokoro()
 
-    # Try installing whisperx if not present
+    # Install WhisperX if needed
     try:
         import whisperx
-        print("[TTS] WhisperX available — will use forced alignment ✅")
+        print("[TTS] WhisperX available — drift-free forced alignment ✅")
     except ImportError:
         print("[TTS] WhisperX not found — installing...")
         subprocess.run(
@@ -189,7 +204,6 @@ def main():
 
     timing_data = {"shorts": [], "full_episode": None}
 
-    # Shorts
     for short in scripts["shorts"]:
         part       = short["part"]
         audio_path = output_dir / f"short_part_{part:02d}.wav"
@@ -197,9 +211,8 @@ def main():
         timing = process_narration(kokoro, short["narration"], voice, audio_path, args.language)
         timing_data["shorts"].append({"part": part, **timing})
 
-    # Full episode
     print(f"\n[TTS] Full episode...")
-    full_path = output_dir / "full_episode.wav"
+    full_path   = output_dir / "full_episode.wav"
     full_timing = process_narration(
         kokoro, scripts["full_episode"]["narration"], voice, full_path, args.language
     )

@@ -1,8 +1,10 @@
 """
 video_utils.py
-Fast video building using FFmpeg scale/pad/xfade — no zoompan.
-Each panel is letterboxed to 1080x1920, joined with xfade transitions.
-ASS subtitles burned in via libass.
+FFmpeg-based video builder with ASS subtitles.
+- Shorts: portrait 1080×1920
+- Full episode: landscape 1920×1080
+Word-level karaoke subtitles: black inactive text, single accent colour box
+with white text for the active word — colour is consistent across entire video.
 """
 
 import os
@@ -14,26 +16,28 @@ from typing import List, Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
-SHORT_WIDTH       = 1080
-SHORT_HEIGHT      = 1920
+# ── Portrait (Shorts) ──────────────────────────────────────────────────────
+SHORT_WIDTH  = 1080
+SHORT_HEIGHT = 1920
+
+# ── Landscape (Full episode) ───────────────────────────────────────────────
+FULL_WIDTH  = 1920
+FULL_HEIGHT = 1080
+
 FPS               = 30
-FONT_SIZE         = 72
-SUBTITLE_Y_MARGIN = 280
+FONT_SIZE         = 72       # shorts
+FONT_SIZE_FULL    = 60       # full episode (wider line, can be slightly smaller)
+SUBTITLE_Y_MARGIN = 280      # from bottom of frame
 
-INACTIVE_FG = "&H00FFFFFF"
-OUTLINE_COL = "&H00000000"
-SHADOW_COL  = "&H88000000"
+# Inactive word colour — BLACK (ASS BGR: 00 00 00 00 → &H00000000)
+INACTIVE_FG  = "&H00000000"
+OUTLINE_COL  = "&H00FFFFFF"   # white outline so black text reads on any panel
+SHADOW_COL   = "&H44FFFFFF"
 
-# Random highlight box colours (BGR hex for ASS \4c)
-HIGHLIGHT_COLOURS = [
-    "&H00CC0000",   # blue
-    "&H0000AA00",   # green
-    "&H000000CC",   # red
-    "&H00CC6600",   # orange
-    "&H00990099",   # purple
-    "&H0000AAAA",   # yellow
-    "&H00AA0055",   # pink-blue
-]
+# Single accent colour used for every highlighted word in the video.
+# Deep accent blue — visible on both dark and light manhwa panels.
+HIGHLIGHT_BOX_COLOUR = "&H00C8640A"   # ASS BGR → orange-amber box
+HIGHLIGHT_TEXT       = "&H00FFFFFF"   # white text on box
 
 TRANSITIONS = ["fade", "slideleft", "slideright", "slideup", "wipeleft", "wiperight"]
 
@@ -60,15 +64,15 @@ def _pil_font(size: int):
 
 # ── Image prep ──────────────────────────────────────────────────────────────
 
-def prepare_page_image(src: Path, dst: Path) -> None:
-    """Fit panel inside 1080x1920 with white padding — never stretched or cropped."""
+def prepare_page_image(src: Path, dst: Path, width: int = SHORT_WIDTH, height: int = SHORT_HEIGHT) -> None:
+    """Fit panel inside target dimensions with white padding — never stretched or cropped."""
     img   = Image.open(src).convert("RGB")
-    scale = min(SHORT_WIDTH / img.width, SHORT_HEIGHT / img.height)
+    scale = min(width / img.width, height / img.height)
     new_w = int(img.width  * scale)
     new_h = int(img.height * scale)
     img   = img.resize((new_w, new_h), Image.LANCZOS)
-    canvas = Image.new("RGB", (SHORT_WIDTH, SHORT_HEIGHT), (255, 255, 255))
-    canvas.paste(img, ((SHORT_WIDTH - new_w) // 2, (SHORT_HEIGHT - new_h) // 2))
+    canvas = Image.new("RGB", (width, height), (255, 255, 255))
+    canvas.paste(img, ((width - new_w) // 2, (height - new_h) // 2))
     canvas.save(dst, "JPEG", quality=92)
 
 
@@ -78,6 +82,8 @@ def prepare_cover_image(
     part: Optional[int],
     cover_image_path: Optional[Path],
     dst: Path,
+    width: int = SHORT_WIDTH,
+    height: int = SHORT_HEIGHT,
 ) -> None:
     def _outlined(draw, x, y, text, font, fill, outline=(0, 0, 0), ow=4):
         for dx in range(-ow, ow + 1):
@@ -86,7 +92,7 @@ def prepare_cover_image(
                     draw.text((x + dx, y + dy), text, font=font, fill=outline)
         draw.text((x, y), text, font=font, fill=fill)
 
-    w, h = SHORT_WIDTH, SHORT_HEIGHT
+    w, h = width, height
 
     if cover_image_path and Path(cover_image_path).exists():
         base  = Image.open(cover_image_path).convert("RGB")
@@ -114,9 +120,9 @@ def prepare_cover_image(
         bb = draw.textbbox((0, 0), text, font=font)
         return (w - (bb[2] - bb[0])) // 2
 
-    _outlined(draw, cx(manhwa, ft),   h // 2 - 180, manhwa,           ft,  (255, 215,   0))
+    _outlined(draw, cx(manhwa, ft),   h // 2 - 180, manhwa,      ft,  (255, 215,   0))
     ep_text = f"Episode {episode}"
-    _outlined(draw, cx(ep_text, fep), h // 2 - 80,  ep_text,          fep, (255, 255, 255))
+    _outlined(draw, cx(ep_text, fep), h // 2 - 80,  ep_text,     fep, (255, 255, 255))
     if part is not None:
         pt_text = f"Part {part}"
         _outlined(draw, cx(pt_text, fpt), h // 2 + 20, pt_text, fpt, (180, 180, 255))
@@ -138,7 +144,17 @@ def generate_ass_subtitles(
     words: List[dict],
     total_duration: float,
     output_path: Path,
+    font_size: int = FONT_SIZE,
 ) -> None:
+    """
+    Generate ASS subtitle file with word-level karaoke highlighting.
+
+    Style rules (per user spec #3 / #11):
+    - All inactive words: BLACK text, no box
+    - Active (highlighted) word: WHITE text, accent-colour opaque background box
+    - ONE consistent accent colour for the whole video (HIGHLIGHT_BOX_COLOUR)
+    - Timestamps extend to the next word's start so the window never goes blank
+    """
     font_path = find_font()
     font_name = "NotoSans Bold"
     if font_path:
@@ -153,7 +169,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{FONT_SIZE},{INACTIVE_FG},{INACTIVE_FG},{OUTLINE_COL},{SHADOW_COL},-1,0,0,0,100,100,2,0,1,3,2,2,40,40,{SUBTITLE_Y_MARGIN},1
+Style: Default,{font_name},{font_size},{INACTIVE_FG},{INACTIVE_FG},{OUTLINE_COL},{SHADOW_COL},-1,0,0,0,100,100,2,0,1,2,1,2,40,40,{SUBTITLE_Y_MARGIN},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -161,19 +177,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     events = []
     WINDOW = 5
 
-    # Pre-assign a random colour to each word (consistent per word, not per render)
-    word_colours = [random.choice(HIGHLIGHT_COLOURS) for _ in words]
-
     for i, word in enumerate(words):
         t_start = word["start"]
-        # Extend end to the next word's start (or total_duration for the last word).
-        # This keeps the caption window visible through pauses and "..." beats
-        # instead of going blank between word.end and the next word.start.
+        # Extend to next word start so caption window stays visible through pauses
         if i + 1 < len(words):
             t_end = words[i + 1]["start"]
         else:
             t_end = total_duration
-        # Never shrink below the word's own end timestamp
+        # Never shrink below the word's own end
         t_end = max(t_end, word["end"])
 
         win_start = max(0, i - WINDOW // 2)
@@ -185,30 +196,27 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         parts = []
         for j, w in enumerate(window):
             global_j = win_start + j
-            if global_j == i:
-                # Active word: show for the full display window (t_start → t_end)
-                # so the highlight doesn't vanish during inter-word pauses.
-                dur_cs = max(1, int(round((t_end - t_start) * 100)))
-            else:
-                dur_cs = max(1, int(round((w["end"] - w["start"]) * 100)))
-            text = w["word"].upper()
+            text     = w["word"].upper()
 
             if global_j == i:
-                # Active word: coloured background box, white bold text
-                colour = word_colours[global_j]
-                # BorderStyle 3 = opaque box. Use a single clean override block.
+                # ── Active word: accent box + white bold text ──────────────
+                # dur_cs spans the full display window (t_start → t_end) so
+                # the box stays on screen through inter-word pauses.
+                dur_cs = max(1, int(round((t_end - t_start) * 100)))
                 styled = (
                     f"{{\\kf{dur_cs}"
                     f"\\bord0\\shad0"
                     f"\\BorderStyle3"
-                    f"\\4c{colour}"
-                    f"\\1c&H00FFFFFF&"
+                    f"\\4c{HIGHLIGHT_BOX_COLOUR}"   # box fill colour
+                    f"\\1c{HIGHLIGHT_TEXT}"          # text colour = white
                     f"\\b1}}"
                     f"{text}"
-                    f"{{\\r}}"   # reset to Default style for next words
+                    f"{{\\r}}"   # reset style for remaining words
                 )
             else:
-                styled = f"{{\\k{dur_cs}}}{text}"
+                # ── Inactive word: black text, no box ─────────────────────
+                dur_cs = max(1, int(round((w["end"] - w["start"]) * 100)))
+                styled = f"{{\\k{dur_cs}\\1c{INACTIVE_FG}}}{text}"
 
             parts.append(styled)
 
@@ -232,12 +240,12 @@ def build_video_ffmpeg(
     animations: List[str],
     cover_duration_s: float = 3.0,
     content_duration_s: float = 60.0,
-    fade_dur: float = 0.3,
+    fade_dur: float = 0.5,
+    width: int = SHORT_WIDTH,
+    height: int = SHORT_HEIGHT,
 ) -> None:
     n_pages      = len(page_images)
-    # Drive page duration by audio — never pad with silence
     per_page_dur = content_duration_s / max(n_pages, 1)
-    # Clamp: min 1s per panel, max 4s (fast scroll if many panels)
     per_page_dur = max(1.0, min(per_page_dur, 4.0))
     trans_dur    = min(0.3, per_page_dur * 0.15)
 
@@ -245,7 +253,11 @@ def build_video_ffmpeg(
     durations  = [cover_duration_s] + [per_page_dur] * n_pages
     total_segs = len(all_images)
     total_dur  = cover_duration_s + per_page_dur * n_pages
-    fade_out_st = max(0.0, total_dur - fade_dur)
+
+    # ── FIX #4: audio fade-out starts 0.5s before end of AUDIO, not video ──
+    # This prevents the voice being clipped if video is marginally shorter
+    audio_fade_st = max(0.0, content_duration_s + cover_duration_s - fade_dur)
+    video_fade_st = max(0.0, total_dur - fade_dur)
 
     inputs = []
     for img, dur in zip(all_images, durations):
@@ -254,16 +266,14 @@ def build_video_ffmpeg(
     audio_idx = total_segs
 
     filter_parts = []
-    seg_labels   = []
     for idx in range(total_segs):
         lbl = f"s{idx}"
         filter_parts.append(
-            f"[{idx}:v]scale={SHORT_WIDTH}:{SHORT_HEIGHT}:"
+            f"[{idx}:v]scale={width}:{height}:"
             f"force_original_aspect_ratio=decrease,"
-            f"pad={SHORT_WIDTH}:{SHORT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:0xFFFFFF,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:0xFFFFFF,"
             f"setsar=1,fps={FPS}[{lbl}]"
         )
-        seg_labels.append(lbl)
 
     if total_segs == 1:
         filter_parts.append("[s0]copy[xout]")
@@ -285,11 +295,12 @@ def build_video_ffmpeg(
     filter_parts.append(f"[xout]ass='{ass_safe}'[subv]")
     filter_parts.append(
         f"[subv]fade=t=in:st=0:d={fade_dur},"
-        f"fade=t=out:st={fade_out_st:.3f}:d={fade_dur}[fv]"
+        f"fade=t=out:st={video_fade_st:.3f}:d={fade_dur}[fv]"
     )
+    # Audio fade anchored to audio duration, not video duration
     filter_parts.append(
         f"[{audio_idx}:a]afade=t=in:st=0:d={fade_dur},"
-        f"afade=t=out:st={fade_out_st:.3f}:d={fade_dur}[fa]"
+        f"afade=t=out:st={audio_fade_st:.3f}:d={fade_dur}[fa]"
     )
 
     cmd = (
