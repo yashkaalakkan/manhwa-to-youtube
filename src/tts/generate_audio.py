@@ -28,6 +28,17 @@ VOICE_MAP = {
     "pt": "bf_emma",
     "hi": "hf_alpha",
 }
+
+KOKORO_LANG_MAP = {
+    "en": "en-us",
+    "es": "es",
+    "fr": "fr-fr",
+    "de": "de",
+    "ja": "ja",
+    "ko": "ko",
+    "pt": "pt-br",
+    "hi": "hi",
+}
 SAMPLE_RATE = 24000
 
 
@@ -39,12 +50,13 @@ def load_kokoro():
         raise ImportError("kokoro-onnx not installed")
 
 
-def generate_tts(kokoro, narration: str, voice: str, output_path: Path) -> float:
+def generate_tts(kokoro, narration: str, voice: str, output_path: Path, language: str = "en") -> float:
     if not narration.strip():
         silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
         sf.write(str(output_path), silence, SAMPLE_RATE)
         return 1.0
-    samples, sample_rate = kokoro.create(narration, voice=voice, speed=1.0, lang="en-us")
+    kokoro_lang = KOKORO_LANG_MAP.get(language, "en-us")
+    samples, sample_rate = kokoro.create(narration, voice=voice, speed=1.0, lang=kokoro_lang)
     max_val = np.max(np.abs(samples))
     if max_val > 0:
         samples = samples / max_val * 0.9
@@ -105,7 +117,7 @@ def proportional_timestamps(narration: str, duration: float):
 def process_narration(kokoro, narration: str, voice: str, audio_path: Path, language: str) -> dict:
     if not narration.strip():
         return {"duration": 1.0, "words": [], "audio_path": str(audio_path)}
-    duration = generate_tts(kokoro, narration, voice, audio_path)
+    duration = generate_tts(kokoro, narration, voice, audio_path, language)
     print(f"    [TTS] {duration:.1f}s audio generated")
     words = align_with_whisperx(audio_path, narration, language)
     if words is None:

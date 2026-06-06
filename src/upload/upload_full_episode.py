@@ -80,10 +80,12 @@ def main():
         # Fallback: count from scripts
         total_shorts = scripts.get("total_parts", 0)
 
-    meta = scripts["full_episode"]["metadata"]
+    # Safely get full episode metadata — key may be absent in older pipeline runs
+    full_ep = scripts.get("full_episode") or {}
+    meta = full_ep.get("metadata") or {}
     title = meta.get("title", f"{args.manhwa} Episode {args.episode} | Full Episode")
-    description = meta.get("description", "")
-    tags = meta.get("tags", [args.manhwa, "manhwa", "anime", "full episode"])
+    description = meta.get("description", f"Watch {args.manhwa} Episode {args.episode} — Full Episode!\n\n#manhwa #anime #webtoon")
+    tags = meta.get("tags", [args.manhwa, "manhwa", "anime", "full episode", "webtoon"])
 
     if shorts_links:
         description += f"\n\n📱 Watch as Shorts:\n{shorts_links}"

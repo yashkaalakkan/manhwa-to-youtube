@@ -109,7 +109,7 @@ jobs:
       - name: 📖 Prepare Chapter 1
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
-          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
@@ -121,10 +121,10 @@ jobs:
             "${{ github.event.inputs.skip_pages }}"
 
       - name: 📖 Prepare Chapter 2
-        if: ${{ github.event.inputs.drive_file_link_2 != '' }}
+        if: github.event.inputs.drive_file_link_2 != ''
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
-          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
@@ -136,10 +136,10 @@ jobs:
             "${{ github.event.inputs.skip_pages }}"
 
       - name: 📖 Prepare Chapter 3
-        if: ${{ github.event.inputs.drive_file_link_3 != '' }}
+        if: github.event.inputs.drive_file_link_3 != ''
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
-          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
@@ -151,10 +151,10 @@ jobs:
             "${{ github.event.inputs.skip_pages }}"
 
       - name: 📖 Prepare Chapter 4
-        if: ${{ github.event.inputs.drive_file_link_4 != '' }}
+        if: github.event.inputs.drive_file_link_4 != ''
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
-          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
@@ -166,10 +166,10 @@ jobs:
             "${{ github.event.inputs.skip_pages }}"
 
       - name: 📖 Prepare Chapter 5
-        if: ${{ github.event.inputs.drive_file_link_5 != '' }}
+        if: github.event.inputs.drive_file_link_5 != ''
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
-          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
@@ -191,7 +191,6 @@ jobs:
         run: |
           EP="${{ github.event.inputs.episode_number }}"
           MANHWA="${{ github.event.inputs.manhwa_name }}"
-          LANG="${{ github.event.inputs.language }}"
           SHORTS_DIR="./output/shorts"
           mkdir -p "$SHORTS_DIR" ./output
 
@@ -208,24 +207,41 @@ jobs:
           for ch in $(seq 1 $CHAPTER_COUNT); do
             echo "--- Building short for chapter $ch ---"
             python src/video/build_shorts.py \
-              --pages-dir    "episode_pages_ch${ch}" \
-              --audio-dir    "pipeline/ch${ch}/audio" \
-              --scripts      "pipeline/ch${ch}/scripts.json" \
-              --output-dir   "$SHORTS_DIR" \
-              --manhwa       "$MANHWA" \
-              --episode      "$EP" \
-              --chapter      "$ch" \
-              --manifest     "pipeline/ch${ch}/manifest.json"
+              --pages-dir  "episode_pages_ch${ch}" \
+              --audio-dir  "pipeline/ch${ch}/audio" \
+              --scripts    "pipeline/ch${ch}/scripts.json" \
+              --output-dir "$SHORTS_DIR" \
+              --manhwa     "$MANHWA" \
+              --episode    "$EP" \
+              --chapter    "$ch" \
+              --manifest   "pipeline/ch${ch}/manifest.json"
           done
 
           # Build combined full episode
           echo "--- Building full episode ($CHAPTER_COUNT chapters combined) ---"
           python src/video/build_full_episode.py \
-            --manhwa     "$MANHWA" \
-            --episode    "$EP" \
-            --output     "./output/full_episode_ep${EP}.mp4" \
-            --shorts-dir "$SHORTS_DIR" \
-            --chapters   "$CHAPTER_COUNT"
+            --manhwa       "$MANHWA" \
+            --episode      "$EP" \
+            --output       "./output/full_episode_ep${EP}.mp4" \
+            --shorts-dir   "$SHORTS_DIR" \
+            --chapters     "$CHAPTER_COUNT" \
+            --groq-api-key "$GROQ_API_KEY"
+
+          # Rename to the fixed filename the upload workflow expects
+          mv "./output/full_episode_ep${EP}.mp4" "./output/full_episode.mp4" 2>/dev/null || true
+
+          # Write CHAPTER_COUNT to env for the next step
+          echo "CHAPTER_COUNT=$CHAPTER_COUNT" >> "$GITHUB_ENV"
+          echo "EP=$EP"                       >> "$GITHUB_ENV"
+          echo "MANHWA=$MANHWA"               >> "$GITHUB_ENV"
+
+      - name: 📋 Build combined pipeline/scripts.json
+        run: |
+          python .github/scripts/merge_scripts.py \
+            --manhwa   "${{ github.event.inputs.manhwa_name }}" \
+            --episode  "${{ github.event.inputs.episode_number }}" \
+            --chapters "$CHAPTER_COUNT" \
+            --output   "pipeline/scripts.json"
 
       - name: 💾 Commit series memory back to repo
         run: |
