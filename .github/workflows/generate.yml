@@ -110,6 +110,8 @@ jobs:
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
@@ -125,6 +127,8 @@ jobs:
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
@@ -140,6 +144,8 @@ jobs:
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
@@ -155,6 +161,8 @@ jobs:
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
@@ -170,6 +178,8 @@ jobs:
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
@@ -188,6 +198,8 @@ jobs:
       - name: 🎬 Build videos
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
           EP="${{ github.event.inputs.episode_number }}"
           MANHWA="${{ github.event.inputs.manhwa_name }}"

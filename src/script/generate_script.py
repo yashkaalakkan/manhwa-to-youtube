@@ -23,25 +23,48 @@ from utils.memory import load_memory, save_memory, build_context_prompt, update_
 
 GROQ_MODEL      = "llama-3.1-8b-instant"
 WORDS_PER_SEC   = 2.5
-INTER_CALL_S    = 15        # base inter-call gap (seconds)
+INTER_CALL_S    = 5         # base inter-call gap; rate limit handler overrides with retry-after
 TARGET_SHORT_S  = 55.0
 COVER_S         = 3.0
 WORDS_PER_SHORT = int((TARGET_SHORT_S - COVER_S) * WORDS_PER_SEC)   # ~130 words
 
-GROQ_RETRIES    = 12        # generous retry count for rate limits
-GROQ_MAX_WAIT   = 180       # cap individual wait at 3 minutes
+GROQ_RETRIES    = 10        # retry count for rate limits
+GROQ_MAX_WAIT   = 65        # Groq free tier resets per-minute; 65s is enough
 
 
-def build_client() -> Groq:
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise EnvironmentError("GROQ_API_KEY not set")
-    return Groq(api_key=api_key)
+def build_clients() -> list:
+    """
+    Return a list of Groq clients from GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3, ...
+    At least one key is required. Multiple keys from different accounts are rotated
+    on 429 so each account's free-tier quota is used independently.
+    """
+    keys = []
+    # Primary key
+    key1 = os.environ.get("GROQ_API_KEY", "")
+    if key1:
+        keys.append(key1)
+    # Extra keys from separate accounts
+    for i in range(2, 6):
+        k = os.environ.get(f"GROQ_API_KEY_{i}", "")
+        if k:
+            keys.append(k)
+    if not keys:
+        raise EnvironmentError("No GROQ_API_KEY set")
+    clients = [Groq(api_key=k) for k in keys]
+    print(f"[Groq] {len(clients)} API key(s) loaded")
+    return clients
 
 
-def groq_call(client: Groq, prompt: str, max_tokens: int = 500, retries: int = GROQ_RETRIES) -> str:
+def groq_call(clients: list, prompt: str, max_tokens: int = 500, retries: int = GROQ_RETRIES) -> str:
+    """
+    Call Groq with automatic key rotation on 429.
+    On rate limit: if multiple clients available, switch to next key immediately.
+    Only sleep when all keys are exhausted for this attempt.
+    """
     delay = INTER_CALL_S
+    n = len(clients)
     for attempt in range(1, retries + 1):
+        client = clients[(attempt - 1) % n]   # rotate through keys
         try:
             resp = client.chat.completions.create(
                 model=GROQ_MODEL,
@@ -53,24 +76,29 @@ def groq_call(client: Groq, prompt: str, max_tokens: int = 500, retries: int = G
         except Exception as e:
             err = str(e)
             if "429" in err or "rate_limit" in err.lower():
-                # Respect Groq's retry-after if present, else exponential backoff
-                m = re.search(r"try again in (\d+(?:\.\d+)?)s", err)
-                wait = float(m.group(1)) + 3 if m else min(delay, GROQ_MAX_WAIT)
-                wait = min(wait, GROQ_MAX_WAIT)
-                print(f"  [Groq] Rate limited — waiting {wait:.0f}s (attempt {attempt}/{retries})")
-                time.sleep(wait)
-                delay = min(delay * 2, GROQ_MAX_WAIT)
+                next_key_idx = attempt % n
+                if n > 1 and next_key_idx != (attempt - 1) % n:
+                    # Still have unused keys this rotation — switch immediately
+                    print(f"  [Groq] Rate limited on key {(attempt-1)%n + 1} — switching to key {next_key_idx + 1} (attempt {attempt}/{retries})")
+                else:
+                    # All keys tried this round — wait before next rotation
+                    m = re.search(r"try again in (\d+(?:\.\d+)?)s", err)
+                    wait = float(m.group(1)) + 3 if m else min(delay, GROQ_MAX_WAIT)
+                    wait = min(wait, GROQ_MAX_WAIT)
+                    print(f"  [Groq] All {n} key(s) rate limited — waiting {wait:.0f}s (attempt {attempt}/{retries})")
+                    time.sleep(wait)
+                    delay = min(delay * 2, GROQ_MAX_WAIT)
             elif "413" in err or "too large" in err.lower():
                 raise RuntimeError(f"Prompt too large: {err}")
             else:
                 raise
     raise RuntimeError(
-        f"Groq failed after {retries} retries — "
-        "consider upgrading your Groq plan or using a different model"
+        f"Groq failed after {retries} retries across {n} key(s) — "
+        "check your Groq quota or add more GROQ_API_KEY_2, GROQ_API_KEY_3 secrets"
     )
 
 
-def narrate(client, pages, manhwa, episode, chapter, language, memory_context="", is_full=False):
+def narrate(clients, pages, manhwa, episode, chapter, language, memory_context="", is_full=False):
     text = "\n\n".join(
         f"[Page {p['page_index']}]\n{p['raw_text']}"
         for p in pages if p.get("raw_text", "").strip()
@@ -102,7 +130,7 @@ PANEL TEXT:
 
 NARRATION:"""
 
-    narration = groq_call(client, prompt, max_tokens=400)
+    narration = groq_call(clients, prompt, max_tokens=400)
     words     = narration.split()
     return {
         "narration":          narration,
@@ -110,7 +138,7 @@ NARRATION:"""
     }
 
 
-def metadata(client, manhwa, episode, chapter, preview, language, memory_context="", is_full=False):
+def metadata(clients, manhwa, episode, chapter, preview, language, memory_context="", is_full=False):
     if is_full:
         video_type = "Full Episode"
         title_hint = f"Episode {episode} Full"
@@ -131,7 +159,7 @@ Rules:
 JSON only, no markdown:
 {{"title":"...","description":"...","tags":[...]}}}}"""
 
-    raw = groq_call(client, prompt, max_tokens=600)
+    raw = groq_call(clients, prompt, max_tokens=600)
     raw = raw.replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(raw)
@@ -172,23 +200,23 @@ def main():
     else:
         print(f"[Script] No prior memory — this is episode 1")
 
-    client = build_client()
+    clients = build_clients()
 
     print(f"[Script] Chapter {args.chapter}: {len(pages)} pages → 1 short")
     print(f"[Script] Narrator: strict third-person | Inter-call delay: {INTER_CALL_S}s")
 
     # ── Short (1 per chapter — all pages of this chapter) ─────────────────
     print(f"\n[Script] Generating short narration for chapter {args.chapter}...")
-    nar  = narrate(client, pages, args.manhwa, args.episode, args.chapter,
+    nar  = narrate(clients, pages, args.manhwa, args.episode, args.chapter,
                    args.language, memory_context, is_full=False)
     time.sleep(INTER_CALL_S)
-    meta = metadata(client, args.manhwa, args.episode, args.chapter,
+    meta = metadata(clients, args.manhwa, args.episode, args.chapter,
                     nar["narration"], args.language, memory_context, is_full=False)
     time.sleep(INTER_CALL_S)
 
     # ── Full episode chunk (this chapter's contribution to the full video) ─
     print(f"[Script] Generating full-episode narration chunk for chapter {args.chapter}...")
-    full_nar  = narrate(client, pages, args.manhwa, args.episode, args.chapter,
+    full_nar  = narrate(clients, pages, args.manhwa, args.episode, args.chapter,
                         args.language, memory_context, is_full=True)
     time.sleep(INTER_CALL_S)
 
