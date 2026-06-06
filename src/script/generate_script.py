@@ -23,10 +23,13 @@ from utils.memory import load_memory, save_memory, build_context_prompt, update_
 
 GROQ_MODEL      = "llama-3.1-8b-instant"
 WORDS_PER_SEC   = 2.5
-INTER_CALL_S    = 12
+INTER_CALL_S    = 15        # base inter-call gap (seconds)
 TARGET_SHORT_S  = 55.0
 COVER_S         = 3.0
 WORDS_PER_SHORT = int((TARGET_SHORT_S - COVER_S) * WORDS_PER_SEC)   # ~130 words
+
+GROQ_RETRIES    = 12        # generous retry count for rate limits
+GROQ_MAX_WAIT   = 180       # cap individual wait at 3 minutes
 
 
 def build_client() -> Groq:
@@ -36,7 +39,7 @@ def build_client() -> Groq:
     return Groq(api_key=api_key)
 
 
-def groq_call(client: Groq, prompt: str, max_tokens: int = 500, retries: int = 6) -> str:
+def groq_call(client: Groq, prompt: str, max_tokens: int = 500, retries: int = GROQ_RETRIES) -> str:
     delay = INTER_CALL_S
     for attempt in range(1, retries + 1):
         try:
@@ -50,16 +53,21 @@ def groq_call(client: Groq, prompt: str, max_tokens: int = 500, retries: int = 6
         except Exception as e:
             err = str(e)
             if "429" in err or "rate_limit" in err.lower():
+                # Respect Groq's retry-after if present, else exponential backoff
                 m = re.search(r"try again in (\d+(?:\.\d+)?)s", err)
-                wait = float(m.group(1)) + 2 if m else delay
-                print(f"  [Groq] Rate limited — waiting {wait:.1f}s (attempt {attempt}/{retries})")
+                wait = float(m.group(1)) + 3 if m else min(delay, GROQ_MAX_WAIT)
+                wait = min(wait, GROQ_MAX_WAIT)
+                print(f"  [Groq] Rate limited — waiting {wait:.0f}s (attempt {attempt}/{retries})")
                 time.sleep(wait)
-                delay = min(delay * 2, 90)
+                delay = min(delay * 2, GROQ_MAX_WAIT)
             elif "413" in err or "too large" in err.lower():
                 raise RuntimeError(f"Prompt too large: {err}")
             else:
                 raise
-    raise RuntimeError(f"Groq failed after {retries} retries")
+    raise RuntimeError(
+        f"Groq failed after {retries} retries — "
+        "consider upgrading your Groq plan or using a different model"
+    )
 
 
 def narrate(client, pages, manhwa, episode, chapter, language, memory_context="", is_full=False):
