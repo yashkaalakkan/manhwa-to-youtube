@@ -6,6 +6,10 @@ Generates narration scripts for ONE chapter:
 
 The full episode is assembled by build_full_episode.py after all chapters
 are processed — this script just contributes this chapter's chunk to it.
+
+AI provider priority:
+  1. Gemini 2.5 Flash-Lite (free, 250k TPM, 1000 RPD) — primary
+  2. Groq llama-3.1-8b-instant (free, multiple keys) — fallback
 """
 
 import argparse
@@ -16,60 +20,118 @@ import sys
 import time
 from pathlib import Path
 
-from groq import Groq
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.memory import load_memory, save_memory, build_context_prompt, update_memory
 
+# ── Model config ───────────────────────────────────────────────────────────────
+GEMINI_MODEL    = "gemini-2.5-flash-lite-preview-06-17"   # best free-tier RPD (1000/day)
 GROQ_MODEL      = "llama-3.1-8b-instant"
+
 WORDS_PER_SEC   = 2.5
-INTER_CALL_S    = 5         # base inter-call gap; rate limit handler overrides with retry-after
+INTER_CALL_S    = 4
 TARGET_SHORT_S  = 58.0
 COVER_S         = 3.0
-WORDS_PER_SHORT = int((TARGET_SHORT_S - COVER_S) * WORDS_PER_SEC)   # ~137 words — fills the short better
+WORDS_PER_SHORT = int((TARGET_SHORT_S - COVER_S) * WORDS_PER_SEC)   # ~137 words
 
-GROQ_RETRIES    = 10        # retry count for rate limits
-GROQ_MAX_WAIT   = 65        # Groq free tier resets per-minute; 65s is enough
+# Groq retry config
+GROQ_RETRIES    = 30       # rounds = retries // n_keys → 30 ÷ 3 = 10 full rotations
+GROQ_MAX_WAIT   = 70       # seconds — Groq free tier resets per minute
 
 
-def build_clients() -> list:
+# ══════════════════════════════════════════════════════════════════════════════
+# Gemini (primary)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_gemini_client():
+    """Return a Gemini GenerativeModel client, or None if no key is set."""
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        return None
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=key)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        print(f"[Gemini] Client ready ({GEMINI_MODEL})")
+        return model
+    except Exception as e:
+        print(f"[Gemini] Failed to initialise: {e}")
+        return None
+
+
+def gemini_call(client, prompt: str, max_tokens: int = 600, retries: int = 5) -> str:
     """
-    Return a list of Groq clients from GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3, ...
-    At least one key is required. Multiple keys from different accounts are rotated
-    on 429 so each account's free-tier quota is used independently.
+    Call Gemini with simple retry + backoff on 429.
+    Raises RuntimeError if all retries fail so the caller can fall back to Groq.
     """
+    import google.generativeai as genai
+    from google.api_core.exceptions import ResourceExhausted, GoogleAPIError
+
+    delay = 15  # Gemini free tier resets per-minute; 15s is usually enough for RPM
+
+    for attempt in range(1, retries + 1):
+        try:
+            resp = client.generate_content(
+                prompt,
+                generation_config=genai.GenerationConfig(
+                    max_output_tokens=max_tokens,
+                    temperature=0.7,
+                ),
+            )
+            return resp.text.strip()
+        except ResourceExhausted as e:
+            err = str(e)
+            # Parse retry-after if Gemini returns it
+            m = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", err)
+            wait = int(m.group(1)) + 2 if m else delay
+            print(f"  [Gemini] Rate limited (attempt {attempt}/{retries}) — sleeping {wait}s")
+            time.sleep(wait)
+            delay = min(delay * 2, 120)
+        except GoogleAPIError as e:
+            raise RuntimeError(f"Gemini API error: {e}")
+
+    raise RuntimeError(f"Gemini failed after {retries} attempt(s) — falling back to Groq")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Groq (fallback)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_groq_clients() -> list:
+    """
+    Return a list of Groq clients from GROQ_API_KEY, GROQ_API_KEY_2, …
+    Returns empty list (not an error) when no keys are set — Gemini is primary.
+    """
+    from groq import Groq
     keys = []
-    # Primary key
     key1 = os.environ.get("GROQ_API_KEY", "")
     if key1:
         keys.append(key1)
-    # Extra keys from separate accounts
     for i in range(2, 6):
         k = os.environ.get(f"GROQ_API_KEY_{i}", "")
         if k:
             keys.append(k)
     if not keys:
-        raise EnvironmentError("No GROQ_API_KEY set")
+        return []
     clients = [Groq(api_key=k) for k in keys]
-    print(f"[Groq] {len(clients)} API key(s) loaded")
+    print(f"[Groq] {len(clients)} fallback key(s) loaded")
     return clients
 
 
-def groq_call(clients: list, prompt: str, max_tokens: int = 500, retries: int = GROQ_RETRIES) -> str:
+def groq_call(clients: list, prompt: str, max_tokens: int = 500) -> str:
     """
-    Call Groq with key rotation + sleep-after-full-rotation strategy.
-    - Try each key in order within a round (no sleep between keys)
-    - After every full rotation through all keys, sleep before the next round
-    - Sleep duration comes from Groq retry-after header if present, else exponential backoff
+    Call Groq with key rotation + sleep-after-full-rotation.
+    - Cycles through all keys before sleeping (no sleep between keys in same round)
+    - Sleeps GROQ_MAX_WAIT after every full rotation through all keys
+    - rounds = GROQ_RETRIES // n_keys  (fixed retry math)
     """
-    n = len(clients)
-    rounds = max(1, retries // n)       # how many full rotations we attempt
-    delay  = 65                          # start at 65s — Groq free tier resets per minute
+    n      = len(clients)
+    rounds = max(1, GROQ_RETRIES // n)
+    delay  = 65
 
     for round_num in range(1, rounds + 1):
         for key_idx in range(n):
             client = clients[key_idx]
-            attempt_label = f"round {round_num}/{rounds}, key {key_idx + 1}/{n}"
+            label  = f"round {round_num}/{rounds}, key {key_idx + 1}/{n}"
             try:
                 resp = client.chat.completions.create(
                     model=GROQ_MODEL,
@@ -82,28 +144,61 @@ def groq_call(clients: list, prompt: str, max_tokens: int = 500, retries: int = 
                 err = str(e)
                 if "429" in err or "rate_limit" in err.lower():
                     if key_idx < n - 1:
-                        # More keys left in this round — switch immediately, no sleep
-                        print(f"  [Groq] Rate limited ({attempt_label}) — trying key {key_idx + 2}/{n}")
+                        print(f"  [Groq] Rate limited ({label}) — trying key {key_idx + 2}/{n}")
                     else:
-                        # End of round — all keys exhausted, must sleep
-                        m = re.search(r"try again in (\d+(?:\.\d+)?)s", err)
+                        m    = re.search(r"try again in (\d+(?:\.\d+)?)s", err)
                         wait = float(m.group(1)) + 3 if m else delay
                         wait = min(wait, GROQ_MAX_WAIT)
-                        print(f"  [Groq] All {n} key(s) rate limited — sleeping {wait:.0f}s before round {round_num + 1} ({attempt_label})")
+                        print(f"  [Groq] All {n} key(s) exhausted — sleeping {wait:.0f}s ({label})")
                         time.sleep(wait)
                         delay = min(delay * 2, GROQ_MAX_WAIT)
                 elif "413" in err or "too large" in err.lower():
-                    raise RuntimeError(f"Prompt too large: {err}")
+                    raise RuntimeError(f"Groq prompt too large: {err}")
                 else:
                     raise
 
     raise RuntimeError(
         f"Groq failed after {rounds} round(s) × {n} key(s) — "
-        "check your Groq quota or add more GROQ_API_KEY_2 / GROQ_API_KEY_3 secrets"
+        "check quota or add GROQ_API_KEY_2 / GROQ_API_KEY_3 secrets"
     )
 
 
-def narrate(clients, pages, manhwa, episode, chapter, language, memory_context="", is_full=False):
+# ══════════════════════════════════════════════════════════════════════════════
+# Unified call — Gemini first, Groq fallback
+# ══════════════════════════════════════════════════════════════════════════════
+
+def llm_call(gemini_client, groq_clients: list, prompt: str, max_tokens: int = 500) -> str:
+    """
+    Try Gemini first. If unavailable or rate-limited, fall back to Groq.
+    Raises RuntimeError only if both providers fail.
+    """
+    # ── Try Gemini ─────────────────────────────────────────────────────────
+    if gemini_client is not None:
+        try:
+            result = gemini_call(gemini_client, prompt, max_tokens=max_tokens)
+            print("  [LLM] ✓ Gemini")
+            return result
+        except RuntimeError as e:
+            print(f"  [LLM] Gemini failed ({e}) — trying Groq fallback...")
+
+    # ── Try Groq ───────────────────────────────────────────────────────────
+    if groq_clients:
+        result = groq_call(groq_clients, prompt, max_tokens=max_tokens)
+        print("  [LLM] ✓ Groq (fallback)")
+        return result
+
+    raise RuntimeError(
+        "No LLM available. Set GEMINI_API_KEY and/or GROQ_API_KEY in your GitHub secrets."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Script generation
+# ══════════════════════════════════════════════════════════════════════════════
+
+def narrate(gemini, groq_clients, pages, manhwa, episode, chapter, language,
+            memory_context="", is_full=False):
+
     text = "\n\n".join(
         f"[Page {p['page_index']}]\n{p['raw_text']}"
         for p in pages if p.get("raw_text", "").strip()
@@ -135,7 +230,7 @@ PANEL TEXT:
 
 NARRATION:"""
 
-    narration = groq_call(clients, prompt, max_tokens=400)
+    narration = llm_call(gemini, groq_clients, prompt, max_tokens=400)
     words     = narration.split()
     return {
         "narration":          narration,
@@ -143,7 +238,8 @@ NARRATION:"""
     }
 
 
-def metadata(clients, manhwa, episode, chapter, preview, language, memory_context="", is_full=False):
+def metadata(gemini, groq_clients, manhwa, episode, chapter, preview, language,
+             memory_context="", is_full=False):
     if is_full:
         video_type = "Full Episode"
         title_hint = f"Episode {episode} Full"
@@ -164,7 +260,7 @@ Rules:
 JSON only, no markdown:
 {{"title":"...","description":"...","tags":[...]}}}}"""
 
-    raw = groq_call(clients, prompt, max_tokens=600)
+    raw = llm_call(gemini, groq_clients, prompt, max_tokens=600)
     raw = raw.replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(raw)
@@ -175,6 +271,10 @@ JSON only, no markdown:
             "tags":        [manhwa, "manhwa", "anime", "webtoon", f"episode{episode}", "shorts"],
         }
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Entry point
+# ══════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser()
@@ -197,7 +297,6 @@ def main():
         pages = json.load(f)
 
     # ── Load series memory ─────────────────────────────────────────────────
-    # Only chapter 1 loads/updates memory — others just read it for context
     memory         = load_memory(args.manhwa)
     memory_context = build_context_prompt(memory)
     if memory_context:
@@ -205,35 +304,40 @@ def main():
     else:
         print(f"[Script] No prior memory — this is episode 1")
 
-    clients = build_clients()
+    # ── Build clients (Gemini primary, Groq fallback) ──────────────────────
+    gemini      = build_gemini_client()
+    groq_clients = build_groq_clients()
+
+    if gemini is None and not groq_clients:
+        raise EnvironmentError(
+            "No API keys found. Set GEMINI_API_KEY (primary) and/or GROQ_API_KEY (fallback) "
+            "in your GitHub repository secrets."
+        )
 
     print(f"[Script] Chapter {args.chapter}: {len(pages)} pages → 1 short")
     print(f"[Script] Narrator: strict third-person | Inter-call delay: {INTER_CALL_S}s")
 
-    # ── Short (1 per chapter — all pages of this chapter) ─────────────────
+    # ── Short (1 per chapter) ──────────────────────────────────────────────
     print(f"\n[Script] Generating short narration for chapter {args.chapter}...")
-    nar  = narrate(clients, pages, args.manhwa, args.episode, args.chapter,
-                   args.language, memory_context, is_full=False)
+    nar = narrate(gemini, groq_clients, pages, args.manhwa, args.episode, args.chapter,
+                  args.language, memory_context, is_full=False)
     time.sleep(INTER_CALL_S)
-    meta = metadata(clients, args.manhwa, args.episode, args.chapter,
+
+    meta = metadata(gemini, groq_clients, args.manhwa, args.episode, args.chapter,
                     nar["narration"], args.language, memory_context, is_full=False)
     time.sleep(INTER_CALL_S)
 
-    # ── Full episode chunk (this chapter's contribution to the full video) ─
+    # ── Full episode chunk ─────────────────────────────────────────────────
     print(f"[Script] Generating full-episode narration chunk for chapter {args.chapter}...")
-    full_nar  = narrate(clients, pages, args.manhwa, args.episode, args.chapter,
-                        args.language, memory_context, is_full=True)
+    full_nar = narrate(gemini, groq_clients, pages, args.manhwa, args.episode, args.chapter,
+                       args.language, memory_context, is_full=True)
     time.sleep(INTER_CALL_S)
 
-    # Series memory is updated in the final build step after all chapters
-    # are processed, so the full episode narration can be used for context.
-
     result = {
-        "manhwa":       args.manhwa,
-        "episode":      args.episode,
-        "chapter":      args.chapter,
-        "language":     args.language,
-        # part=1 always — each chapter is exactly 1 short
+        "manhwa":   args.manhwa,
+        "episode":  args.episode,
+        "chapter":  args.chapter,
+        "language": args.language,
         "shorts": [{
             "part":               1,
             "page_start":         pages[0]["page_index"] if pages else 1,
@@ -243,7 +347,6 @@ def main():
             "estimated_duration": nar["estimated_duration"],
             "metadata":           meta,
         }],
-        # This chapter's narration chunk for the combined full episode
         "full_episode_chunk": {
             "narration":          full_nar["narration"],
             "estimated_duration": full_nar["estimated_duration"],
