@@ -117,7 +117,7 @@ def main():
 
     youtube = get_youtube_client()
 
-    short_files = sorted(shorts_dir.glob(f"short_ep{args.episode:02d}_part*.mp4"))
+    short_files = sorted(shorts_dir.glob(f"short_ep{args.episode:02d}_ch*.mp4"))
     total = len(short_files)
 
     if not short_files:
