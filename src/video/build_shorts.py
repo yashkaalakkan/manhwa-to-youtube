@@ -21,7 +21,7 @@ from video_utils import (
 )
 
 COVER_DURATION_S = 3.0
-MIN_PAGE_DUR_S   = 1.5
+MIN_PAGE_DUR_S   = 1.0    # lowered from 1.5 — fits more panels in the short
 MAX_PAGE_DUR_S   = 4.0
 
 
@@ -39,11 +39,18 @@ def build_short(
     per_panel = audio_duration / max(len(pages), 1)
     per_panel = max(MIN_PAGE_DUR_S, min(per_panel, MAX_PAGE_DUR_S))
 
-    # Trim panels if audio is too short to show all
+    # Uniform-sample panels so the full chapter arc is represented
     max_panels = max(1, int(audio_duration / MIN_PAGE_DUR_S))
     if len(pages) > max_panels:
-        print(f"  [Short] {len(pages)} panels → trimmed to {max_panels} to fit {audio_duration:.1f}s audio")
-        pages = pages[:max_panels]
+        # Always include first + last panel; fill middle with evenly-spaced picks
+        step = len(pages) / max_panels
+        indices = sorted(set(
+            [0]
+            + [round(i * step) for i in range(1, max_panels - 1)]
+            + [len(pages) - 1]
+        ))
+        pages = [pages[i] for i in indices[:max_panels]]
+        print(f"  [Short] Uniform-sampled {len(pages)}/{max_panels} panels from full chapter (covers beginning → end)")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)

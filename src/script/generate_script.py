@@ -24,9 +24,9 @@ from utils.memory import load_memory, save_memory, build_context_prompt, update_
 GROQ_MODEL      = "llama-3.1-8b-instant"
 WORDS_PER_SEC   = 2.5
 INTER_CALL_S    = 5         # base inter-call gap; rate limit handler overrides with retry-after
-TARGET_SHORT_S  = 55.0
+TARGET_SHORT_S  = 58.0
 COVER_S         = 3.0
-WORDS_PER_SHORT = int((TARGET_SHORT_S - COVER_S) * WORDS_PER_SEC)   # ~130 words
+WORDS_PER_SHORT = int((TARGET_SHORT_S - COVER_S) * WORDS_PER_SEC)   # ~137 words — fills the short better
 
 GROQ_RETRIES    = 10        # retry count for rate limits
 GROQ_MAX_WAIT   = 65        # Groq free tier resets per-minute; 65s is enough
@@ -57,44 +57,49 @@ def build_clients() -> list:
 
 def groq_call(clients: list, prompt: str, max_tokens: int = 500, retries: int = GROQ_RETRIES) -> str:
     """
-    Call Groq with automatic key rotation on 429.
-    On rate limit: if multiple clients available, switch to next key immediately.
-    Only sleep when all keys are exhausted for this attempt.
+    Call Groq with key rotation + sleep-after-full-rotation strategy.
+    - Try each key in order within a round (no sleep between keys)
+    - After every full rotation through all keys, sleep before the next round
+    - Sleep duration comes from Groq retry-after header if present, else exponential backoff
     """
-    delay = INTER_CALL_S
     n = len(clients)
-    for attempt in range(1, retries + 1):
-        client = clients[(attempt - 1) % n]   # rotate through keys
-        try:
-            resp = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=max_tokens,
-            )
-            return resp.choices[0].message.content.strip()
-        except Exception as e:
-            err = str(e)
-            if "429" in err or "rate_limit" in err.lower():
-                next_key_idx = attempt % n
-                if n > 1 and next_key_idx != (attempt - 1) % n:
-                    # Still have unused keys this rotation — switch immediately
-                    print(f"  [Groq] Rate limited on key {(attempt-1)%n + 1} — switching to key {next_key_idx + 1} (attempt {attempt}/{retries})")
+    rounds = max(1, retries // n)       # how many full rotations we attempt
+    delay  = 65                          # start at 65s — Groq free tier resets per minute
+
+    for round_num in range(1, rounds + 1):
+        for key_idx in range(n):
+            client = clients[key_idx]
+            attempt_label = f"round {round_num}/{rounds}, key {key_idx + 1}/{n}"
+            try:
+                resp = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    max_tokens=max_tokens,
+                )
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                err = str(e)
+                if "429" in err or "rate_limit" in err.lower():
+                    if key_idx < n - 1:
+                        # More keys left in this round — switch immediately, no sleep
+                        print(f"  [Groq] Rate limited ({attempt_label}) — trying key {key_idx + 2}/{n}")
+                    else:
+                        # End of round — all keys exhausted, must sleep
+                        m = re.search(r"try again in (\d+(?:\.\d+)?)s", err)
+                        wait = float(m.group(1)) + 3 if m else delay
+                        wait = min(wait, GROQ_MAX_WAIT)
+                        print(f"  [Groq] All {n} key(s) rate limited — sleeping {wait:.0f}s before round {round_num + 1} ({attempt_label})")
+                        time.sleep(wait)
+                        delay = min(delay * 2, GROQ_MAX_WAIT)
+                elif "413" in err or "too large" in err.lower():
+                    raise RuntimeError(f"Prompt too large: {err}")
                 else:
-                    # All keys tried this round — wait before next rotation
-                    m = re.search(r"try again in (\d+(?:\.\d+)?)s", err)
-                    wait = float(m.group(1)) + 3 if m else min(delay, GROQ_MAX_WAIT)
-                    wait = min(wait, GROQ_MAX_WAIT)
-                    print(f"  [Groq] All {n} key(s) rate limited — waiting {wait:.0f}s (attempt {attempt}/{retries})")
-                    time.sleep(wait)
-                    delay = min(delay * 2, GROQ_MAX_WAIT)
-            elif "413" in err or "too large" in err.lower():
-                raise RuntimeError(f"Prompt too large: {err}")
-            else:
-                raise
+                    raise
+
     raise RuntimeError(
-        f"Groq failed after {retries} retries across {n} key(s) — "
-        "check your Groq quota or add more GROQ_API_KEY_2, GROQ_API_KEY_3 secrets"
+        f"Groq failed after {rounds} round(s) × {n} key(s) — "
+        "check your Groq quota or add more GROQ_API_KEY_2 / GROQ_API_KEY_3 secrets"
     )
 
 
@@ -117,7 +122,7 @@ STRICT RULES:
 - Describe what characters do, see, feel, and think from the OUTSIDE
 - Reported thoughts: write "Lloyd wonders..." not "I wonder..."
 - Add "..." only for genuine dramatic pauses — max 2 per narration
-- SHORT: max {WORDS_PER_SHORT} words, end on a hook that makes viewers want the next chapter
+- SHORT: aim for {WORDS_PER_SHORT} words (do not cut short — use the full budget), end on a hook that makes viewers want the next chapter
 - FULL: continuous flowing narration, no cuts, no part labels
 - Use memory context for continuity — do NOT re-introduce characters already known
 - Output ONLY the narration text. No labels, no preamble.
