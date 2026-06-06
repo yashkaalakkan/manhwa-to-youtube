@@ -52,20 +52,23 @@ def _pil_font(size: int):
 # ── Image prep ─────────────────────────────────────────────────────────────
 
 def prepare_page_image(src: Path, dst: Path) -> None:
-    """Scale + center-crop to exactly 1080x1920."""
+    """
+    Fit panel inside 1080x1920 with white padding (letterbox/pillarbox).
+    The panel is NEVER stretched or cropped — it is shown at its true proportions
+    centred on a white canvas.  This is correct for tall manhwa panels.
+    """
     img = Image.open(src).convert("RGB")
-    src_ratio = img.width / img.height
-    tgt_ratio = SHORT_WIDTH / SHORT_HEIGHT
-    if src_ratio > tgt_ratio:
-        new_h = SHORT_HEIGHT
-        new_w = int(img.width * SHORT_HEIGHT / img.height)
-    else:
-        new_w = SHORT_WIDTH
-        new_h = int(img.height * SHORT_WIDTH / img.width)
-    img = img.resize((new_w, new_h), Image.LANCZOS)
-    x = (new_w - SHORT_WIDTH)  // 2
-    y = (new_h - SHORT_HEIGHT) // 2
-    img.crop((x, y, x + SHORT_WIDTH, y + SHORT_HEIGHT)).save(dst, "JPEG", quality=92)
+    # Scale so the panel fits entirely within the target frame
+    scale = min(SHORT_WIDTH / img.width, SHORT_HEIGHT / img.height)
+    new_w = int(img.width  * scale)
+    new_h = int(img.height * scale)
+    img   = img.resize((new_w, new_h), Image.LANCZOS)
+    # Place on white canvas, centred
+    canvas = Image.new("RGB", (SHORT_WIDTH, SHORT_HEIGHT), (255, 255, 255))
+    x_off  = (SHORT_WIDTH  - new_w) // 2
+    y_off  = (SHORT_HEIGHT - new_h) // 2
+    canvas.paste(img, (x_off, y_off))
+    canvas.save(dst, "JPEG", quality=92)
 
 
 def prepare_cover_image(
@@ -236,15 +239,15 @@ def build_video_ffmpeg(
     inputs += ["-i", str(audio_path)]
     audio_idx = total_segs
 
-    # Scale each input to exact size
+    # Scale each input to fit inside frame (letterbox — no crop, no stretch)
     filter_parts = []
     seg_labels   = []
     for idx in range(total_segs):
         lbl = f"s{idx}"
         filter_parts.append(
             f"[{idx}:v]scale={SHORT_WIDTH}:{SHORT_HEIGHT}:"
-            f"force_original_aspect_ratio=increase,"
-            f"crop={SHORT_WIDTH}:{SHORT_HEIGHT},"
+            f"force_original_aspect_ratio=decrease,"
+            f"pad={SHORT_WIDTH}:{SHORT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:0xFFFFFF,"
             f"setsar=1,fps={FPS}[{lbl}]"
         )
         seg_labels.append(lbl)
