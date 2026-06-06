@@ -32,7 +32,7 @@ on:
         default: "1"
         type: string
       pages_per_short:
-        description: "Ignored — always 4 parts per episode"
+        description: "Ignored — kept for compatibility"
         required: false
         default: "auto"
         type: string
@@ -142,7 +142,7 @@ jobs:
             --output-dir ./output/shorts \
             --manhwa "${{ github.event.inputs.manhwa_name }}" \
             --episode "${{ github.event.inputs.episode_number }}" \
-            --pages-per-short "auto"
+
 
       - name: 💾 Save shorts as artifact (early — so they're accessible even if later steps fail)
         if: always()

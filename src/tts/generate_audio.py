@@ -17,7 +17,7 @@ import numpy as np
 import soundfile as sf
 
 VOICE_MAP = {
-    "en": "af_heart",
+    "en": "am_adam",
     "es": "ef_dora",
     "fr": "ff_siwis",
     "de": "df_eva",
@@ -44,7 +44,7 @@ def generate_tts(kokoro, narration: str, voice: str, output_path: Path) -> float
         sf.write(str(output_path), silence, SAMPLE_RATE)
         return 1.0
 
-    samples, sample_rate = kokoro.create(narration, voice=voice, speed=0.95, lang="en-us")
+    samples, sample_rate = kokoro.create(narration, voice=voice, speed=1.0, lang="en-us")
     max_val = np.max(np.abs(samples))
     if max_val > 0:
         samples = samples / max_val * 0.9
@@ -103,9 +103,21 @@ def align_with_whisperx(audio_path: Path, narration: str, language: str) -> list
 
 
 def proportional_timestamps(narration: str, duration: float) -> list[dict]:
-    """Fallback: distribute duration proportionally by word length."""
-    words   = re.findall(r"\S+", narration)
-    weights = [max(len(re.sub(r"[^a-zA-Z]", "", w)), 1) for w in words]
+    """Fallback: distribute duration proportionally by word length.
+
+    Pause tokens ("...", "—", "–", ellipsis-heavy words) get extra weight so
+    captions don't race through dramatic beats when WhisperX is unavailable.
+    """
+    words = re.findall(r"\S+", narration)
+
+    def _weight(w: str) -> float:
+        # Count pause/ellipsis characters as ~1.5 letters each
+        letters   = len(re.sub(r"[^a-zA-Z]", "", w))
+        pauses    = w.count(".") + w.count("…") + w.count("—") + w.count("–")
+        raw       = letters + pauses * 1.5
+        return max(raw, 1.0)
+
+    weights = [_weight(w) for w in words]
     total   = sum(weights)
     result  = []
     cursor  = 0.0

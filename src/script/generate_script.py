@@ -21,10 +21,18 @@ from groq import Groq
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.memory import load_memory, save_memory, build_context_prompt, update_memory
 
-GROQ_MODEL    = "llama-3.1-8b-instant"
-WORDS_PER_SEC = 2.5
-INTER_CALL_S  = 12
-NUM_SHORTS    = 4
+GROQ_MODEL       = "llama-3.1-8b-instant"
+WORDS_PER_SEC    = 2.5
+INTER_CALL_S     = 12
+TARGET_SHORT_S   = 55.0   # must match build_shorts.py
+COVER_S          = 3.0
+MIN_PANEL_S      = 1.5    # must match build_shorts.py
+WORDS_PER_SHORT  = int((TARGET_SHORT_S - COVER_S) * WORDS_PER_SEC)   # ~130 words
+
+
+def panels_per_short_dynamic() -> int:
+    """Same formula as build_shorts.ideal_panels_per_short() — kept in sync."""
+    return max(1, int((TARGET_SHORT_S - COVER_S) / MIN_PANEL_S))
 
 
 def build_client() -> Groq:
@@ -81,7 +89,7 @@ def narrate(client, pages, manhwa, episode, part, language, memory_context="", i
     if not text.strip():
         return {"narration": "", "estimated_duration": 0}
 
-    ctx  = "full episode" if is_full else f"part {part} of 4 short (under 60s)"
+    ctx  = "full episode" if is_full else f"part {part} short (under 60s)"
     lang = f"Respond in {language}." if language != "en" else "Respond in English."
 
     prompt = f"""{memory_context}You are a professional manhwa narrator.
@@ -111,7 +119,7 @@ NARRATION:"""
 
 
 def metadata(client, manhwa, episode, part, preview, language, memory_context=""):
-    video_type = f"Part {part} of 4 (Short)" if part else "Full Episode"
+    video_type = f"Part {part} Short" if part else "Full Episode"
     prompt = f"""{memory_context}YouTube SEO expert. Generate metadata for a manhwa narration video.
 
 Manhwa: "{manhwa}" | Episode: {episode} | Type: {video_type} | Lang: {language}
@@ -144,7 +152,9 @@ def main():
     parser.add_argument("--manhwa",          required=True)
     parser.add_argument("--episode",         required=True, type=int)
     parser.add_argument("--language",        default="en")
-    parser.add_argument("--pages-per-short", default="auto", help="Ignored — always 4 parts")
+    # both ignored — shorts count is computed dynamically from panel count
+    parser.add_argument("--panels-per-short", default="auto")
+    parser.add_argument("--pages-per-short",  default="auto")
     parser.add_argument("--output",          required=True)
     args = parser.parse_args()
 
@@ -163,8 +173,27 @@ def main():
         print(f"[Script] No prior memory — this is episode 1")
 
     client = build_client()
-    chunks = split_evenly(pages, NUM_SHORTS)
-    print(f"[Script] {len(pages)} pages → {len(chunks)} shorts")
+    # Compute number of shorts dynamically from panel count — no hardcoding.
+    # Mirror build_shorts.py's manifest logic exactly so both scripts always
+    # agree on the number of shorts (fixes the "extra shorts skipped" bug).
+    import math
+    manifest_path = Path("pipeline/manifest.json")
+    if manifest_path.exists():
+        with open(manifest_path) as mf:
+            mfdata = json.load(mf)
+        if mfdata.get("use_panels") and mfdata.get("panels"):
+            # Panel-split mode: each sub-panel counts as one unit
+            n_panels = len(mfdata["panels"])
+        else:
+            # Page mode: only count non-skipped pages (same as build_shorts.py)
+            skip = set(mfdata.get("skip_pages", []))
+            n_panels = len([p for p in mfdata.get("pages", []) if p["index"] not in skip])
+    else:
+        n_panels = len(pages)
+    pps        = panels_per_short_dynamic()   # e.g. 34 for 55s target
+    num_shorts = max(1, math.ceil(n_panels / pps))
+    chunks     = split_evenly(pages, num_shorts)
+    print(f"[Script] {len(pages)} pages | {n_panels} panels → {num_shorts} shorts (~{pps} panels/short, targeting {TARGET_SHORT_S}s each)")
     print(f"[Script] Inter-call delay: {INTER_CALL_S}s")
 
     result = {
@@ -205,7 +234,12 @@ def main():
             full_parts.append(nd["narration"])
         time.sleep(INTER_CALL_S)
 
-    combined  = " ".join(full_parts)
+    # Join chunks with a single space and normalise whitespace so proportional
+    # timestamp distribution and TTS don't accumulate drift at seam points.
+    combined = " ".join(part.strip() for part in full_parts if part.strip())
+    # Collapse any double-spaces that crept in from chunk boundaries
+    import re as _re
+    combined = _re.sub(r" {2,}", " ", combined).strip()
     full_meta = metadata(client, args.manhwa, args.episode, None,
                          combined[:250], args.language, memory_context)
     time.sleep(INTER_CALL_S)
