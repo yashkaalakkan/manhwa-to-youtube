@@ -1,0 +1,31 @@
+# Pipeline outputs (too large for git)
+episode_pages/
+pipeline/
+output/
+
+# Kokoro model files (download separately)
+*.onnx
+*.bin
+
+# Credentials
+/tmp/gdrive_credentials.json
+*credentials*.json
+*token*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

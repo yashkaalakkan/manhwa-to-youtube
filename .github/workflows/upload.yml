@@ -1,0 +1,186 @@
+name: 📤 Step 2 — Upload to YouTube
+
+on:
+  # Auto-triggered immediately after Step 1 completes successfully
+  workflow_run:
+    workflows: ["🎬 Step 1 — Generate Videos"]
+    types: [completed]
+
+  # Manual fallback — for resume/retry scenarios
+  workflow_dispatch:
+    inputs:
+      episode_number:
+        description: "Episode number (must match Step 1)"
+        required: true
+        type: string
+      manhwa_name:
+        description: "Manhwa/Manga title"
+        required: true
+        type: string
+      language:
+        description: "Language"
+        required: false
+        default: "en"
+        type: choice
+        options: [en, es, fr, de, ja, ko, pt, hi]
+      artifact_run_id:
+        description: "Run ID from Step 1 (find in the URL of that run)"
+        required: true
+        type: string
+      start_from_part:
+        description: "Resume shorts from this part number (default: 1)"
+        required: false
+        default: "1"
+        type: string
+      skip_shorts:
+        description: "Skip all shorts — only upload full episode (use if all shorts done but full ep failed)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      actions: read      # needed to download artifacts from other workflow runs
+      contents: read
+
+    # For auto-trigger: only run if Step 1 succeeded
+    # For manual trigger: always run
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: ⬇️ Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📦 Install Python dependencies
+        run: pip install google-api-python-client google-auth google-auth-oauthlib
+
+      # ── Resolve inputs for both auto and manual triggers ──────────────────
+      - name: 📋 Resolve run context
+        id: ctx
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run_id=${{ github.event.inputs.artifact_run_id }}" >> $GITHUB_OUTPUT
+            echo "episode=${{ github.event.inputs.episode_number }}" >> $GITHUB_OUTPUT
+            echo "manhwa=${{ github.event.inputs.manhwa_name }}" >> $GITHUB_OUTPUT
+            echo "language=${{ github.event.inputs.language }}" >> $GITHUB_OUTPUT
+            echo "start_from_part=${{ github.event.inputs.start_from_part }}" >> $GITHUB_OUTPUT
+            echo "skip_shorts=${{ github.event.inputs.skip_shorts }}" >> $GITHUB_OUTPUT
+          else
+            # Auto-trigger: pull metadata from the triggering workflow run
+            echo "run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+            # Extract episode/manhwa from the triggering run's name
+            TITLE="${{ github.event.workflow_run.display_title }}"
+            echo "episode=auto" >> $GITHUB_OUTPUT
+            echo "manhwa=auto" >> $GITHUB_OUTPUT
+            echo "language=en" >> $GITHUB_OUTPUT
+            echo "start_from_part=1" >> $GITHUB_OUTPUT
+            echo "skip_shorts=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: ⬇️ Download generated videos artifact
+        uses: actions/download-artifact@v4
+        with:
+          # Matches the artifact name set in generate.yml
+          pattern: episode-*-videos
+          path: .
+          run-id: ${{ steps.ctx.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          merge-multiple: true
+
+      - name: 📋 Verify downloaded files
+        run: |
+          echo "=== Pipeline files ==="
+          ls -lh pipeline/ || echo "⚠️ No pipeline dir"
+          echo "=== Shorts ==="
+          ls -lh output/shorts/ || echo "⚠️ No shorts dir"
+          echo "=== Full episode ==="
+          ls -lh output/full_episode.mp4 2>/dev/null || echo "⚠️ No full episode file"
+
+          # Fail early if critical files missing
+          if [ ! -f pipeline/scripts.json ]; then
+            echo "❌ pipeline/scripts.json missing — was Step 1 successful?"
+            exit 1
+          fi
+          if [ ! -f output/full_episode.mp4 ]; then
+            echo "❌ output/full_episode.mp4 missing"
+            exit 1
+          fi
+
+      # ── Upload shorts (skipped if skip_shorts=true) ───────────────────────
+      - name: 📤 Upload Shorts to YouTube
+        if: ${{ steps.ctx.outputs.skip_shorts != 'true' }}
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: |
+          # Resolve episode number from scripts.json if auto-triggered
+          EPISODE="${{ steps.ctx.outputs.episode }}"
+          if [ "$EPISODE" = "auto" ]; then
+            EPISODE=$(python -c "import json; d=json.load(open('pipeline/scripts.json')); print(d['episode'])")
+          fi
+          MANHWA="${{ steps.ctx.outputs.manhwa }}"
+          if [ "$MANHWA" = "auto" ]; then
+            MANHWA=$(python -c "import json; d=json.load(open('pipeline/scripts.json')); print(d['manhwa'])")
+          fi
+
+          python src/upload/upload_shorts.py \
+            --shorts-dir ./output/shorts \
+            --scripts ./pipeline/scripts.json \
+            --manhwa "$MANHWA" \
+            --episode "$EPISODE" \
+            --language "${{ steps.ctx.outputs.language }}" \
+            --start-from-part "${{ steps.ctx.outputs.start_from_part }}"
+
+      # ── Upload full episode ───────────────────────────────────────────────
+      - name: 📤 Upload Full Episode to YouTube
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: |
+          EPISODE="${{ steps.ctx.outputs.episode }}"
+          if [ "$EPISODE" = "auto" ]; then
+            EPISODE=$(python -c "import json; d=json.load(open('pipeline/scripts.json')); print(d['episode'])")
+          fi
+          MANHWA="${{ steps.ctx.outputs.manhwa }}"
+          if [ "$MANHWA" = "auto" ]; then
+            MANHWA=$(python -c "import json; d=json.load(open('pipeline/scripts.json')); print(d['manhwa'])")
+          fi
+
+          python src/upload/upload_full_episode.py \
+            --video ./output/full_episode.mp4 \
+            --scripts ./pipeline/scripts.json \
+            --manhwa "$MANHWA" \
+            --episode "$EPISODE" \
+            --language "${{ steps.ctx.outputs.language }}"
+
+      # ── Save upload logs as artifact for debugging ────────────────────────
+      - name: 📊 Save upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upload-logs-ep${{ steps.ctx.outputs.episode }}
+          path: pipeline/upload_log_*.json
+          retention-days: 7
+
+      # ── Print final publish schedule ──────────────────────────────────────
+      - name: 📅 Print publish schedule
+        if: always()
+        run: |
+          echo "=== Shorts upload log ==="
+          cat pipeline/upload_log_shorts.json 2>/dev/null || echo "Not found"
+          echo ""
+          echo "=== Full episode upload log ==="
+          cat pipeline/upload_log_full.json 2>/dev/null || echo "Not found"

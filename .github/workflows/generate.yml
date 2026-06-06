@@ -1,0 +1,172 @@
+name: 🎬 Step 1 — Generate Videos
+
+on:
+  workflow_dispatch:
+    inputs:
+      manhwa_name:
+        description: "Manhwa/Manga title (e.g. Solo Leveling)"
+        required: true
+        type: string
+      episode_number:
+        description: "Episode number (e.g. 1)"
+        required: true
+        type: string
+      drive_file_link:
+        description: "Public Google Drive link to the episode PDF"
+        required: true
+        type: string
+      cover_image_link:
+        description: "Public Drive link for cover image (optional)"
+        required: false
+        default: ""
+        type: string
+      language:
+        description: "Subtitle/TTS language"
+        required: false
+        default: "en"
+        type: choice
+        options: [en, es, fr, de, ja, ko, pt, hi]
+      skip_pages:
+        description: "Page numbers to skip, comma-separated (default: 1)"
+        required: false
+        default: "1"
+        type: string
+      pages_per_short:
+        description: "Ignored — always 4 parts per episode"
+        required: false
+        default: "auto"
+        type: string
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    permissions:
+      contents: write   # needed to commit memory file back
+
+    steps:
+      - name: ⬇️ Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📦 Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            ffmpeg \
+            tesseract-ocr \
+            tesseract-ocr-eng \
+            tesseract-ocr-jpn \
+            tesseract-ocr-kor \
+            libgl1 \
+            libglib2.0-0 \
+            espeak-ng \
+            libsndfile1 \
+            fonts-noto \
+            fonts-noto-cjk \
+            imagemagick \
+            poppler-utils
+
+      - name: 📦 Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pdf2image pymupdf
+
+      - name: ⬇️ Download Kokoro TTS model files
+        run: |
+          wget -q -O kokoro-v1.0.onnx \
+            https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+          wget -q -O voices-v1.0.bin \
+            https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+          echo "Kokoro models ready ✅"
+
+      - name: ⬇️ Download episode PDF + convert to images
+        env:
+          GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+        run: |
+          python src/utils/drive_downloader.py \
+            --file-link "${{ github.event.inputs.drive_file_link }}" \
+            --output-dir ./episode_pages \
+            --cover-link "${{ github.event.inputs.cover_image_link }}" \
+            --skip-pages "${{ github.event.inputs.skip_pages }}" \
+            --dpi 150
+
+      - name: 🔍 OCR — Extract text from manga panels
+        run: |
+          python src/ocr/extract_text.py \
+            --pages-dir ./episode_pages \
+            --output ./pipeline/raw_text.json \
+            --language "${{ github.event.inputs.language }}" \
+            --skip-pages "${{ github.event.inputs.skip_pages }}"
+
+      - name: 🤖 Generate narration scripts via Groq
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python src/script/generate_script.py \
+            --raw-text ./pipeline/raw_text.json \
+            --manhwa "${{ github.event.inputs.manhwa_name }}" \
+            --episode "${{ github.event.inputs.episode_number }}" \
+            --language "${{ github.event.inputs.language }}" \
+            --output ./pipeline/scripts.json
+
+      - name: 💾 Commit series memory back to repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add series_memory/
+          git diff --staged --quiet || git commit -m \
+            "🧠 Memory: ${{ github.event.inputs.manhwa_name }} ep${{ github.event.inputs.episode_number }}"
+          git push
+
+      - name: 🎙️ Generate TTS audio via Kokoro
+        run: |
+          python src/tts/generate_audio.py \
+            --scripts ./pipeline/scripts.json \
+            --output-dir ./pipeline/audio \
+            --language "${{ github.event.inputs.language }}"
+
+      - name: 🎬 Build short videos
+        run: |
+          python src/video/build_shorts.py \
+            --pages-dir ./episode_pages \
+            --audio-dir ./pipeline/audio \
+            --scripts ./pipeline/scripts.json \
+            --output-dir ./output/shorts \
+            --manhwa "${{ github.event.inputs.manhwa_name }}" \
+            --episode "${{ github.event.inputs.episode_number }}" \
+            --pages-per-short "auto"
+
+      - name: 💾 Save shorts as artifact (early — so they're accessible even if later steps fail)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shorts-ep${{ github.event.inputs.episode_number }}-preview
+          path: output/shorts/
+          retention-days: 3
+
+      - name: 🎬 Build full episode video
+        run: |
+          python src/video/build_full_episode.py \
+            --pages-dir ./episode_pages \
+            --audio-dir ./pipeline/audio \
+            --scripts ./pipeline/scripts.json \
+            --output ./output/full_episode.mp4 \
+            --manhwa "${{ github.event.inputs.manhwa_name }}" \
+            --episode "${{ github.event.inputs.episode_number }}"
+
+      - name: 💾 Save all outputs as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: episode-${{ github.event.inputs.episode_number }}-videos
+          path: |
+            pipeline/
+            output/
+          retention-days: 3

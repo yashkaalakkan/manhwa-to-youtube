@@ -1,0 +1,14 @@
+CLIENT_ID: 9742965913-l8dqv8ql022hq7seb1c0q6eq40e0hdbn.apps.googleusercontent.com
+CLIENT_SECRET: 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
+REFRESH_TOKEN: 1//0gaWm3OTXJMiBCgYIARAAGBASNwF-L9IraHiMFfE33pPV5TmwFMAFuLW1FFt-NawaZFhH8NGHglwf9yxk18zCIDmSbGs_4PUBQSM
+
+
+cd C:\Users\aksha\OneDrive\Desktop\manhwa-to-youtube
+python -c "
+from google_auth_oauthlib.flow import InstalledAppFlow
+flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', scopes=['https://www.googleapis.com/auth/youtube.upload'])
+creds = flow.run_local_server(port=0)
+print('CLIENT_ID:', creds.client_id)
+print('CLIENT_SECRET:', creds.client_secret)
+print('REFRESH_TOKEN:', creds.refresh_token)
+"
