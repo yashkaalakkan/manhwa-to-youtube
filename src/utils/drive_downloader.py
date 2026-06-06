@@ -144,8 +144,10 @@ def main():
                         help="Optional: public Drive link for a separate cover image")
     parser.add_argument("--dpi", type=int, default=150,
                         help="DPI for PDF→image conversion (default 150; higher = better quality but slower)")
-    parser.add_argument("--skip-pages", default="1",
-                        help="Comma-separated page numbers to skip (default: 1)")
+    parser.add_argument("--skip-pages", default="auto",
+                        help="'auto' skips first + last 2 pages, or comma-separated numbers")
+    parser.add_argument("--manifest-out", default="",
+                        help="Path to write manifest.json (default: pipeline/manifest.json)")
     args = parser.parse_args()
 
     api_key = os.environ.get("GDRIVE_API_KEY")
@@ -155,8 +157,10 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    pipeline_dir = Path("pipeline")
-    pipeline_dir.mkdir(parents=True, exist_ok=True)
+
+    # Manifest path: explicit --manifest-out or fallback to pipeline/manifest.json
+    manifest_path = Path(args.manifest_out) if args.manifest_out else Path("pipeline/manifest.json")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Download PDF ────────────────────────────────────────────────────────
     try:
@@ -196,13 +200,25 @@ def main():
             print(f"[Drive] ⚠️  Could not download cover: {e} — continuing without it")
 
     # ── Parse skip list ──────────────────────────────────────────────────────
-    skip_pages = {
-        int(x.strip())
-        for x in args.skip_pages.split(",")
-        if x.strip().isdigit()
-    }
-    if skip_pages:
-        print(f"[Drive] Will skip page(s): {sorted(skip_pages)}")
+    skip_input  = args.skip_pages.strip()
+    total_pages = len(page_paths)
+
+    if skip_input.lower() == "auto":
+        if total_pages >= 3:
+            skip_pages = {1, total_pages - 1, total_pages}
+        elif total_pages >= 1:
+            skip_pages = {1}
+        else:
+            skip_pages = set()
+        print(f"[Drive] Auto-skip: pages {sorted(skip_pages)} (of {total_pages} total)")
+    else:
+        skip_pages = {
+            int(x.strip())
+            for x in skip_input.split(",")
+            if x.strip().isdigit()
+        }
+        if skip_pages:
+            print(f"[Drive] Will skip page(s): {sorted(skip_pages)}")
 
     # ── Save manifest ────────────────────────────────────────────────────────
     manifest = {
@@ -216,7 +232,6 @@ def main():
         "file_id": file_id,
         "skip_pages": sorted(skip_pages),
     }
-    manifest_path = pipeline_dir / "manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
 
@@ -231,8 +246,7 @@ def main():
 
     # Update manifest with panel info
     with open(manifest_path) as f:
-        manifest = json.load(f)
-    manifest["panels"] = [
+        manifest = json.load(f)    manifest["panels"] = [
         {"index": i + 1, "path": str(p), "original_name": p.name}
         for i, p in enumerate(all_panels)
     ]

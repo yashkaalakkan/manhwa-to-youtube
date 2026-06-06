@@ -124,7 +124,7 @@ def prepare_cover_image(
     ep_text = f"Episode {episode}"
     _outlined(draw, cx(ep_text, fep), h // 2 - 80,  ep_text,     fep, (255, 255, 255))
     if part is not None:
-        pt_text = f"Part {part}"
+        pt_text = f"Chapter {part}"
         _outlined(draw, cx(pt_text, fpt), h // 2 + 20, pt_text, fpt, (180, 180, 255))
 
     base.save(dst, "JPEG", quality=93)
@@ -145,6 +145,8 @@ def generate_ass_subtitles(
     total_duration: float,
     output_path: Path,
     font_size: int = FONT_SIZE,
+    width: int = SHORT_WIDTH,
+    height: int = SHORT_HEIGHT,
 ) -> None:
     """
     Generate ASS subtitle file with word-level karaoke highlighting.
@@ -163,8 +165,8 @@ def generate_ass_subtitles(
     header = f"""\
 [Script Info]
 ScriptType: v4.00+
-PlayResX: {SHORT_WIDTH}
-PlayResY: {SHORT_HEIGHT}
+PlayResX: {width}
+PlayResY: {height}
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]

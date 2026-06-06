@@ -1,13 +1,12 @@
 """
 build_shorts.py
-Builds short videos — one per ~10 panels (not hardcoded to 4).
-So 126 panels → ~13 shorts, each with its own narration chunk.
-All animation/subtitle rendering done natively in FFmpeg.
+Builds ONE short video per chapter (portrait 1080x1920).
+All panels of the chapter scroll across the short's duration.
+Called once per chapter with --chapter N.
 """
 
 import argparse
 import json
-import math
 import random
 import tempfile
 from pathlib import Path
@@ -21,42 +20,9 @@ from video_utils import (
     prepare_page_image,
 )
 
-COVER_DURATION_S  = 3.0
-TARGET_SHORT_S    = 55.0   # target total short duration (YouTube limit is 60s)
-WORDS_PER_SEC     = 2.5    # kokoro TTS speed at speed=1.0
-WORDS_PER_SHORT   = int((TARGET_SHORT_S - COVER_DURATION_S) * WORDS_PER_SEC)  # ~130 words
-MIN_PAGE_DUR_S    = 1.5    # fastest scroll: 1.5s per panel
-MAX_PAGE_DUR_S    = 4.0    # slowest scroll: 4s per panel
-MIN_PANELS        = 3      # minimum panels to still make a short
-
-
-def ideal_panels_per_short() -> int:
-    """
-    Calculate how many panels fit in one short at minimum scroll speed.
-    This is the max panels we pack per short — drives number of shorts dynamically.
-    Always computed from TARGET_SHORT_S so every chapter self-adjusts.
-    """
-    content_s = TARGET_SHORT_S - COVER_DURATION_S   # 52s
-    return max(1, int(content_s / MIN_PAGE_DUR_S))  # 52 / 1.5 = 34
-
-
-def split_panels_into_shorts(all_pages: dict) -> List[List[int]]:
-    """
-    Split panel indices into chunks, targeting TARGET_SHORT_S per short.
-    Number of shorts is computed from panel count — never hardcoded.
-    """
-    panels_per_short = ideal_panels_per_short()
-    indices  = sorted(all_pages.keys())
-    n_panels = len(indices)
-    n_shorts = max(1, math.ceil(n_panels / panels_per_short))
-    size     = math.ceil(n_panels / n_shorts)
-    chunks   = []
-    for i in range(n_shorts):
-        chunk = indices[i * size : (i + 1) * size]
-        if len(chunk) >= MIN_PANELS or (chunk and i == n_shorts - 1):
-            chunks.append(chunk)
-    print(f"[Shorts] {n_panels} panels → {len(chunks)} shorts (~{panels_per_short} panels/short targeting {TARGET_SHORT_S}s)")
-    return chunks
+COVER_DURATION_S = 3.0
+MIN_PAGE_DUR_S   = 1.5
+MAX_PAGE_DUR_S   = 4.0
 
 
 def build_short(
@@ -66,38 +32,32 @@ def build_short(
     output_path: Path,
     manhwa: str,
     episode: int,
-    part: int,
-    total_parts: int,
+    chapter: int,
     cover_image: Optional[Path],
     audio_duration: float,
 ) -> None:
-    # Drive video duration by audio — panels scroll to match voice
     per_panel = audio_duration / max(len(pages), 1)
     per_panel = max(MIN_PAGE_DUR_S, min(per_panel, MAX_PAGE_DUR_S))
 
-    # If clamping to MIN_PAGE_DUR_S means the total visual time exceeds audio,
-    # trim the panel list so every shown panel is fully visible rather than
-    # having the last panels cut off mid-transition by FFmpeg -shortest.
+    # Trim panels if audio is too short to show all
     max_panels = max(1, int(audio_duration / MIN_PAGE_DUR_S))
     if len(pages) > max_panels:
-        print(f"  [Short {part}] {len(pages)} panels → trimmed to {max_panels} to fit {audio_duration:.1f}s audio")
+        print(f"  [Short] {len(pages)} panels → trimmed to {max_panels} to fit {audio_duration:.1f}s audio")
         pages = pages[:max_panels]
-
-    # actual_content matches audio so it never runs silent or gets cut
-    actual_content = audio_duration
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
 
         cover_dst = tmp / "cover.jpg"
-        prepare_cover_image(manhwa, episode, part, cover_image, cover_dst)
+        prepare_cover_image(manhwa, episode, chapter, cover_image, cover_dst)
 
         page_dsts = []
         for i, pg in enumerate(pages):
             dst = tmp / f"page_{i:03d}.jpg"
             prepare_page_image(pg, dst)
             page_dsts.append(dst)
-        print(f"  [Short {part}] {len(page_dsts)} panels | {audio_duration:.1f}s audio | {per_panel:.1f}s/panel")
+
+        print(f"  [Short] Ch{chapter}: {len(page_dsts)} panels | {audio_duration:.1f}s audio | {per_panel:.1f}s/panel")
 
         offset_words = [
             {**w, "start": w["start"] + COVER_DURATION_S,
@@ -106,7 +66,7 @@ def build_short(
         ]
 
         ass_path = tmp / "subs.ass"
-        generate_ass_subtitles(offset_words, COVER_DURATION_S + actual_content, ass_path)
+        generate_ass_subtitles(offset_words, COVER_DURATION_S + audio_duration, ass_path)
 
         pool       = ANIMATIONS.copy()
         random.shuffle(pool)
@@ -120,23 +80,22 @@ def build_short(
             output_path=output_path,
             animations=animations,
             cover_duration_s=COVER_DURATION_S,
-            content_duration_s=actual_content,
+            content_duration_s=audio_duration,
         )
 
-    print(f"  [Short {part}/{total_parts}] ✅ → {output_path}")
+    print(f"  [Short] ✅ → {output_path}")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pages-dir",       required=True)
-    parser.add_argument("--audio-dir",       required=True)
-    parser.add_argument("--scripts",         required=True)
-    parser.add_argument("--output-dir",      required=True)
-    parser.add_argument("--manhwa",          required=True)
-    parser.add_argument("--episode",         required=True, type=int)
-    # kept for backward-compat, both ignored — duration is computed dynamically
-    parser.add_argument("--panels-per-short", default="auto")
-    parser.add_argument("--pages-per-short",  default="auto")
+    parser.add_argument("--pages-dir",  required=True)
+    parser.add_argument("--audio-dir",  required=True)
+    parser.add_argument("--scripts",    required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--manhwa",     required=True)
+    parser.add_argument("--episode",    required=True, type=int)
+    parser.add_argument("--chapter",    required=True, type=int)
+    parser.add_argument("--manifest",   default="")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -149,15 +108,17 @@ def main():
     with open(timing_path, encoding="utf-8") as f:
         timing_data = json.load(f)
 
-    # Load panels from manifest
-    manifest_path = Path("pipeline/manifest.json")
+    # Load panels from this chapter's manifest
+    manifest_path = Path(args.manifest) if args.manifest else \
+                    Path(args.scripts).parent / "manifest.json"
+
     if manifest_path.exists():
         with open(manifest_path) as f:
             manifest = json.load(f)
         if manifest.get("use_panels") and manifest.get("panels"):
             all_pages   = {p["index"]: Path(p["path"]) for p in manifest["panels"]}
             cover_image = Path(manifest["cover"]) if manifest.get("cover") else None
-            print(f"[Shorts] {len(all_pages)} panels loaded (panel-split mode)")
+            print(f"[Short] {len(all_pages)} panels loaded (panel-split mode)")
         else:
             skip = set(manifest.get("skip_pages", []))
             all_pages = {
@@ -166,7 +127,6 @@ def main():
                 if p["index"] not in skip
             }
             cover_image = Path(manifest["cover"]) if manifest.get("cover") else None
-            print(f"[Shorts] {len(all_pages)} pages loaded (skip: {sorted(skip)})")
     else:
         page_files = sorted(
             list(Path(args.pages_dir).glob("page_*.jpg")) +
@@ -175,41 +135,28 @@ def main():
         all_pages   = {i + 1: p for i, p in enumerate(page_files)}
         cover_image = None
 
-    page_chunks = split_panels_into_shorts(all_pages)
-    total_parts = len(page_chunks)
+    pages   = [all_pages[i] for i in sorted(all_pages.keys())]
+    short   = scripts["shorts"][0]   # always 1 short per chapter
+    timing  = timing_data["shorts"][0]
 
-    for part, panel_indices in enumerate(page_chunks, start=1):
-        pages = [all_pages[i] for i in panel_indices]
+    audio_path  = Path(args.audio_dir) / "short_part_01.wav"
+    output_path = output_dir / f"short_ep{args.episode:02d}_ch{args.chapter:02d}.mp4"
 
-        # Match script & timing for this part
-        short_script = next((s for s in scripts["shorts"] if s["part"] == part), None)
-        timing       = next((t for t in timing_data["shorts"] if t["part"] == part), None)
+    print(f"\n[Short] Building chapter {args.chapter} short → {output_path.name}")
 
-        audio_path = Path(args.audio_dir) / f"short_part_{part:02d}.wav"
-        if not audio_path.exists():
-            print(f"[Shorts] ⚠️  No audio for part {part} — skipping")
-            continue
-        if not timing:
-            print(f"[Shorts] ⚠️  No timing for part {part} — skipping")
-            continue
+    build_short(
+        pages=pages,
+        audio_path=audio_path,
+        timing_words=timing["words"],
+        output_path=output_path,
+        manhwa=args.manhwa,
+        episode=args.episode,
+        chapter=args.chapter,
+        cover_image=cover_image,
+        audio_duration=timing["duration"],
+    )
 
-        output_path = output_dir / f"short_ep{args.episode:02d}_part{part:02d}.mp4"
-        print(f"\n[Shorts] Part {part}/{total_parts}: panels {panel_indices[0]}–{panel_indices[-1]}")
-
-        build_short(
-            pages=pages,
-            audio_path=audio_path,
-            timing_words=timing["words"],
-            output_path=output_path,
-            manhwa=args.manhwa,
-            episode=args.episode,
-            part=part,
-            total_parts=total_parts,
-            cover_image=cover_image,
-            audio_duration=timing["duration"],
-        )
-
-    print(f"\n[Shorts] ✅ {total_parts} shorts built → {output_dir}")
+    print(f"\n[Short] ✅ Chapter {args.chapter} short done")
 
 
 if __name__ == "__main__":

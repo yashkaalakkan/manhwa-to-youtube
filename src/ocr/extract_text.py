@@ -94,8 +94,10 @@ def main():
     parser.add_argument("--pages-dir", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--language", default="en")
-    parser.add_argument("--skip-pages", default="1",
-                        help="Comma-separated page numbers to skip (default: 1)")
+    parser.add_argument("--skip-pages", default="auto",
+                        help="'auto' skips first + last 2 pages, or comma-separated numbers")
+    parser.add_argument("--manifest", default="",
+                        help="Path to chapter manifest.json")
     args = parser.parse_args()
 
     pages_dir   = Path(args.pages_dir)
@@ -104,17 +106,36 @@ def main():
 
     lang = LANG_MAP.get(args.language, "eng")
 
+    # Load manifest to get total page count for auto-skip
+    manifest_path = Path(args.manifest) if args.manifest else Path("pipeline/manifest.json")
+
     # Parse skip list
-    skip = {
-        int(x.strip())
-        for x in args.skip_pages.split(",")
-        if x.strip().isdigit()
-    }
-    if skip:
-        print(f"[OCR] Skipping page(s): {sorted(skip)}")
+    skip_input = args.skip_pages.strip()
+    if skip_input.lower() == "auto":
+        if manifest_path.exists():
+            with open(manifest_path) as f:
+                _m = json.load(f)
+            total_pages = len(_m.get("pages", []))
+        else:
+            exts = ["*.jpg", "*.jpeg", "*.png", "*.webp"]
+            total_pages = len([p for ext in exts for p in pages_dir.glob(ext)])
+        if total_pages >= 3:
+            skip = {1, total_pages - 1, total_pages}
+        elif total_pages >= 1:
+            skip = {1}
+        else:
+            skip = set()
+        print(f"[OCR] Auto-skip: pages {sorted(skip)} (of {total_pages} total)")
+    else:
+        skip = {
+            int(x.strip())
+            for x in skip_input.split(",")
+            if x.strip().isdigit()
+        }
+        if skip:
+            print(f"[OCR] Skipping page(s): {sorted(skip)}")
 
     # Load page paths from manifest or glob
-    manifest_path = Path("pipeline/manifest.json")
     if manifest_path.exists():
         with open(manifest_path) as f:
             manifest = json.load(f)

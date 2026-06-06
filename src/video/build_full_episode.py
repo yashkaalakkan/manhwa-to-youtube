@@ -1,17 +1,26 @@
 """
 build_full_episode.py
-Builds the full episode long-form video in LANDSCAPE 1920x1080.
-Cover (5s) + all pages animated + ASS subtitles + audio fades.
-Every 5 shorts are also compiled into a single landscape compilation video.
+Builds the full episode landscape video (1920x1080) by combining ALL chapters.
+
+Called ONCE after all chapters are processed. It:
+1. Concatenates full_chunk.wav from each chapter into one audio track
+2. Merges all chapters' panels in order
+3. Renders one landscape video: cover + all panels + synced subtitles
 """
 
 import argparse
 import json
 import math
+import os
 import random
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
+
+import numpy as np
+import soundfile as sf
 
 from video_utils import (
     TRANSITIONS as ANIMATIONS,
@@ -24,9 +33,54 @@ from video_utils import (
     prepare_page_image,
 )
 
-COVER_DURATION_S  = 5.0
-MIN_PAGE_DUR_S    = 3.0
-SHORTS_PER_VIDEO  = 5   # every 5 shorts become 1 compiled long video
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils.memory import load_memory, save_memory, build_context_prompt, update_memory
+
+COVER_DURATION_S = 5.0
+MIN_PAGE_DUR_S   = 3.0
+SHORTS_PER_COMPILATION = 5
+
+
+def concat_audio(chunk_paths: list[Path], output_path: Path) -> tuple[float, list[dict]]:
+    """
+    Concatenate multiple wav files into one.
+    Returns (total_duration, merged_word_timing_list).
+    Word timings are offset so they align to the correct position in the combined audio.
+    """
+    all_samples = []
+    total_dur   = 0.0
+    sample_rate = 24000
+
+    for path in chunk_paths:
+        data, sr = sf.read(str(path))
+        if sr != sample_rate:
+            raise RuntimeError(f"Sample rate mismatch: {path} is {sr}Hz, expected {sample_rate}Hz")
+        all_samples.append(data)
+        total_dur += len(data) / sr
+
+    combined = np.concatenate(all_samples)
+    sf.write(str(output_path), combined, sample_rate)
+    print(f"[FullEp] Combined audio: {len(chunk_paths)} chunks → {total_dur:.1f}s")
+    return total_dur, combined
+
+
+def merge_word_timings(chapter_timings: list[dict]) -> list[dict]:
+    """
+    Merge per-chapter word timing lists, offsetting each chapter's
+    timestamps by the cumulative duration of previous chapters.
+    """
+    merged  = []
+    offset  = 0.0
+    for ct in chapter_timings:
+        dur   = ct["duration"]
+        for w in ct["words"]:
+            merged.append({
+                "word":  w["word"],
+                "start": round(w["start"] + offset, 3),
+                "end":   round(w["end"]   + offset, 3),
+            })
+        offset += dur
+    return merged
 
 
 def build_full_episode(
@@ -47,11 +101,9 @@ def build_full_episode(
         tmp = Path(tmpdir)
 
         cover_dst = tmp / "cover.jpg"
-        prepare_cover_image(
-            manhwa, episode, part=None,
-            cover_image_path=cover_image, dst=cover_dst,
-            width=FULL_WIDTH, height=FULL_HEIGHT,
-        )
+        prepare_cover_image(manhwa, episode, part=None,
+                            cover_image_path=cover_image, dst=cover_dst,
+                            width=FULL_WIDTH, height=FULL_HEIGHT)
         print(f"[FullEp] Cover prepared (landscape {FULL_WIDTH}×{FULL_HEIGHT})")
 
         page_dsts = []
@@ -68,19 +120,15 @@ def build_full_episode(
         ]
 
         ass_path = tmp / "subs.ass"
-        generate_ass_subtitles(
-            offset_words,
-            COVER_DURATION_S + content_dur,
-            ass_path,
-            font_size=FONT_SIZE_FULL,
-        )
+        generate_ass_subtitles(offset_words, COVER_DURATION_S + content_dur, ass_path,
+                               font_size=FONT_SIZE_FULL, width=FULL_WIDTH, height=FULL_HEIGHT)
         print(f"[FullEp] Subtitles: {len(offset_words)} words")
 
         pool = ANIMATIONS * (n_pages // len(ANIMATIONS) + 1)
         random.shuffle(pool)
         animations = pool[:n_pages]
 
-        print(f"[FullEp] FFmpeg encoding ({COVER_DURATION_S}s cover + {content_dur:.1f}s content, landscape)...")
+        print(f"[FullEp] FFmpeg encoding ({COVER_DURATION_S}s cover + {content_dur:.1f}s content)...")
         build_video_ffmpeg(
             page_images=page_dsts,
             cover_image=cover_dst,
@@ -97,24 +145,15 @@ def build_full_episode(
     print(f"[FullEp] ✅ → {output_path}")
 
 
-def build_compilation(
-    short_video_paths: list,
-    output_path: Path,
-    manhwa: str,
-    episode: int,
-    compilation_num: int,
-) -> None:
-    """
-    Concatenate multiple short videos into one landscape compilation video.
-    Uses FFmpeg concat demuxer — no re-encoding of individual clips.
-    """
+def build_compilation(short_video_paths: list, output_path: Path,
+                      manhwa: str, episode: int, compilation_num: int) -> None:
+    """Concatenate multiple short videos into one landscape compilation."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp      = Path(tmpdir)
         listfile = tmp / "concat.txt"
         lines    = [f"file '{p.resolve()}'\n" for p in short_video_paths]
         listfile.write_text("".join(lines), encoding="utf-8")
 
-        import subprocess
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
@@ -134,59 +173,95 @@ def build_compilation(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pages-dir",    required=True)
-    parser.add_argument("--audio-dir",    required=True)
-    parser.add_argument("--scripts",      required=True)
-    parser.add_argument("--output",       required=True)
-    parser.add_argument("--manhwa",       required=True)
-    parser.add_argument("--episode",      required=True, type=int)
-    # optional: path to shorts output dir for compilation step
-    parser.add_argument("--shorts-dir",   default="")
+    parser.add_argument("--manhwa",      required=True)
+    parser.add_argument("--episode",     required=True, type=int)
+    parser.add_argument("--output",      required=True)
+    parser.add_argument("--shorts-dir",  required=True,
+                        help="Directory where per-chapter shorts were saved")
+    parser.add_argument("--chapters",    required=True, type=int,
+                        help="Total number of chapters processed")
+    parser.add_argument("--cover-link",  default="")
+    parser.add_argument("--groq-api-key", default="")
     args = parser.parse_args()
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(args.scripts, encoding="utf-8") as f:
-        scripts = json.load(f)
+    # ── Collect per-chapter data ──────────────────────────────────────────
+    all_pages         = {}
+    chunk_timings     = []
+    chunk_audio_paths = []
+    combined_narration_parts = []
+    cover_image       = None
+    global_panel_idx  = 1
 
-    timing_path = Path(args.scripts).parent / "audio_timing.json"
-    with open(timing_path, encoding="utf-8") as f:
-        timing_data = json.load(f)
+    for ch in range(1, args.chapters + 1):
+        pipeline_dir = Path(f"pipeline/ch{ch}")
+        manifest_path = pipeline_dir / "manifest.json"
+        timing_path   = pipeline_dir / "audio_timing.json"
 
-    manifest_path = Path("pipeline/manifest.json")
-    if manifest_path.exists():
+        if not manifest_path.exists():
+            print(f"[FullEp] ⚠️  No manifest for chapter {ch} — skipping")
+            continue
+
         with open(manifest_path) as f:
             manifest = json.load(f)
+
+        # Panels
         if manifest.get("use_panels") and manifest.get("panels"):
-            all_pages   = {p["index"]: Path(p["path"]) for p in manifest["panels"]}
-            cover_image = Path(manifest["cover"]) if manifest.get("cover") else None
-            print(f"[FullEp] Using {len(all_pages)} panels (panel-split mode)")
+            ch_pages = {p["index"]: Path(p["path"]) for p in manifest["panels"]}
         else:
-            skip = set(manifest.get("skip_pages", []))
-            all_pages = {
+            skip     = set(manifest.get("skip_pages", []))
+            ch_pages = {
                 p["index"]: Path(p["path"])
                 for p in manifest["pages"]
                 if p["index"] not in skip
             }
-            cover_image = Path(manifest["cover"]) if manifest.get("cover") else None
-    else:
-        page_files = sorted(
-            list(Path(args.pages_dir).glob("page_*.jpg")) +
-            list(Path(args.pages_dir).glob("page_*.png"))
-        )
-        all_pages   = {i + 1: p for i, p in enumerate(page_files)}
-        cover_image = None
 
-    full_audio     = Path(args.audio_dir) / "full_episode.wav"
-    timing_words   = timing_data["full_episode"]["words"]
-    audio_duration = timing_data["full_episode"]["duration"]
+        for local_idx in sorted(ch_pages.keys()):
+            all_pages[global_panel_idx] = ch_pages[local_idx]
+            global_panel_idx += 1
 
-    print(f"[FullEp] {len(all_pages)} pages | {audio_duration:.1f}s audio | landscape {FULL_WIDTH}×{FULL_HEIGHT}")
+        # Cover image (use chapter 1's)
+        if ch == 1 and manifest.get("cover"):
+            cover_image = Path(manifest["cover"])
 
+        # Narration chunk for memory
+        scripts_path = pipeline_dir / "scripts.json"
+        if scripts_path.exists():
+            with open(scripts_path) as f:
+                ch_scripts = json.load(f)
+            chunk_narr = ch_scripts.get("full_episode_chunk", {}).get("narration", "")
+            if chunk_narr:
+                combined_narration_parts.append(chunk_narr)
+
+        # Audio chunk
+        chunk_path = pipeline_dir / "audio" / "full_chunk.wav"
+        if not chunk_path.exists():
+            print(f"[FullEp] ⚠️  No full_chunk.wav for chapter {ch} — skipping audio")
+            continue
+        chunk_audio_paths.append(chunk_path)
+
+        # Timing
+        if timing_path.exists():
+            with open(timing_path) as f:
+                td = json.load(f)
+            if td.get("full_episode_chunk"):
+                chunk_timings.append(td["full_episode_chunk"])
+
+    print(f"[FullEp] {len(all_pages)} total panels from {args.chapters} chapters")
+
+    # ── Concatenate audio ─────────────────────────────────────────────────
+    combined_audio = output_path.parent / "full_episode_combined.wav"
+    audio_duration, _ = concat_audio(chunk_audio_paths, combined_audio)
+
+    # ── Merge word timings ────────────────────────────────────────────────
+    timing_words = merge_word_timings(chunk_timings)
+
+    # ── Build the full episode video ──────────────────────────────────────
     build_full_episode(
         all_pages=all_pages,
-        audio_path=full_audio,
+        audio_path=combined_audio,
         timing_words=timing_words,
         output_path=output_path,
         manhwa=args.manhwa,
@@ -195,17 +270,48 @@ def main():
         audio_duration=audio_duration,
     )
 
-    # ── Compile every 5 shorts into a long landscape video ──────────────
-    if args.shorts_dir:
-        shorts_dir = Path(args.shorts_dir)
-        short_files = sorted(shorts_dir.glob(f"short_ep{args.episode:02d}_part*.mp4"))
-        if short_files:
-            n_compilations = math.ceil(len(short_files) / SHORTS_PER_VIDEO)
-            print(f"\n[Compile] {len(short_files)} shorts → {n_compilations} compilation video(s)")
-            for ci in range(n_compilations):
-                batch       = short_files[ci * SHORTS_PER_VIDEO : (ci + 1) * SHORTS_PER_VIDEO]
-                comp_path   = output_path.parent / f"compilation_ep{args.episode:02d}_vol{ci+1:02d}.mp4"
-                build_compilation(batch, comp_path, args.manhwa, args.episode, ci + 1)
+    # ── Update series memory with full episode narration ──────────────────
+    groq_api_key = args.groq_api_key or os.environ.get("GROQ_API_KEY", "")
+    if groq_api_key and combined_narration_parts:
+        try:
+            import time
+            from groq import Groq
+            combined_narration = " ".join(combined_narration_parts)
+
+            def _groq_call(client, prompt, max_tokens=400, retries=3):
+                import re
+                for attempt in range(retries):
+                    try:
+                        resp = client.chat.completions.create(
+                            model="llama-3.1-8b-instant",
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.7, max_tokens=max_tokens,
+                        )
+                        return resp.choices[0].message.content.strip()
+                    except Exception as e:
+                        if attempt < retries - 1:
+                            time.sleep(12)
+                        else:
+                            raise
+
+            client = Groq(api_key=groq_api_key)
+            memory = load_memory(args.manhwa)
+            memory = update_memory(memory, args.episode, combined_narration, client, _groq_call)
+            save_memory(args.manhwa, memory)
+            print(f"[Memory] ✅ Series memory updated for episode {args.episode}")
+        except Exception as e:
+            print(f"[Memory] ⚠️  Could not update memory: {e}")
+    else:
+        print(f"[Memory] Skipping memory update (no GROQ_API_KEY or no narration)")
+    shorts_dir  = Path(args.shorts_dir)
+    short_files = sorted(shorts_dir.glob(f"short_ep{args.episode:02d}_ch*.mp4"))
+    if short_files:
+        n_compilations = math.ceil(len(short_files) / SHORTS_PER_COMPILATION)
+        print(f"\n[Compile] {len(short_files)} shorts → {n_compilations} compilation(s)")
+        for ci in range(n_compilations):
+            batch     = short_files[ci * SHORTS_PER_COMPILATION:(ci + 1) * SHORTS_PER_COMPILATION]
+            comp_path = output_path.parent / f"compilation_ep{args.episode:02d}_vol{ci+1:02d}.mp4"
+            build_compilation(batch, comp_path, args.manhwa, args.episode, ci + 1)
 
 
 if __name__ == "__main__":

@@ -47,12 +47,7 @@ on:
         type: choice
         options: [en, es, fr, de, ja, ko, pt, hi]
       skip_pages:
-        description: "Page numbers to skip, comma-separated (default: 1)"
-        required: false
-        default: "1"
-        type: string
-      pages_per_short:
-        description: "Ignored — kept for compatibility"
+        description: "Pages to skip: 'auto' skips first + last 2 pages, or comma-separated numbers (e.g. 1,45,46)"
         required: false
         default: "auto"
         type: string
@@ -107,12 +102,11 @@ jobs:
             https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
           echo "Kokoro models ready ✅"
 
-      # ── Process each chapter separately ─────────────────────────────────
-      # Chapter 1 is always required; chapters 2-5 are optional.
-      # Each chapter becomes: N shorts + 1 full-episode video.
-      # Every 5 shorts across all chapters are compiled into 1 landscape video.
+      # ── Prepare each chapter (download → OCR → script → TTS) ────────────
+      # Each chapter produces: 1 short script + audio + 1 full-ep chunk audio
+      # No video is built here — all video building happens in the final step.
 
-      - name: 🎬 Process Chapter 1
+      - name: 📖 Prepare Chapter 1
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
           GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
@@ -126,7 +120,7 @@ jobs:
             "${{ github.event.inputs.language }}" \
             "${{ github.event.inputs.skip_pages }}"
 
-      - name: 🎬 Process Chapter 2
+      - name: 📖 Prepare Chapter 2
         if: ${{ github.event.inputs.drive_file_link_2 != '' }}
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
@@ -141,7 +135,7 @@ jobs:
             "${{ github.event.inputs.language }}" \
             "${{ github.event.inputs.skip_pages }}"
 
-      - name: 🎬 Process Chapter 3
+      - name: 📖 Prepare Chapter 3
         if: ${{ github.event.inputs.drive_file_link_3 != '' }}
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
@@ -156,7 +150,7 @@ jobs:
             "${{ github.event.inputs.language }}" \
             "${{ github.event.inputs.skip_pages }}"
 
-      - name: 🎬 Process Chapter 4
+      - name: 📖 Prepare Chapter 4
         if: ${{ github.event.inputs.drive_file_link_4 != '' }}
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
@@ -171,7 +165,7 @@ jobs:
             "${{ github.event.inputs.language }}" \
             "${{ github.event.inputs.skip_pages }}"
 
-      - name: 🎬 Process Chapter 5
+      - name: 📖 Prepare Chapter 5
         if: ${{ github.event.inputs.drive_file_link_5 != '' }}
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
@@ -185,6 +179,53 @@ jobs:
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \
             "${{ github.event.inputs.skip_pages }}"
+
+      # ── Build all videos ─────────────────────────────────────────────────
+      # Shorts: 1 per chapter (portrait 1080x1920)
+      # Full episode: all chapters combined (landscape 1920x1080)
+      # Compilations: every 5 shorts concatenated
+
+      - name: 🎬 Build videos
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          EP="${{ github.event.inputs.episode_number }}"
+          MANHWA="${{ github.event.inputs.manhwa_name }}"
+          LANG="${{ github.event.inputs.language }}"
+          SHORTS_DIR="./output/shorts"
+          mkdir -p "$SHORTS_DIR" ./output
+
+          # Count how many chapters were actually processed
+          CHAPTER_COUNT=0
+          for ch in 1 2 3 4 5; do
+            if [ -f "pipeline/ch${ch}/scripts.json" ]; then
+              CHAPTER_COUNT=$ch
+            fi
+          done
+          echo "Chapters processed: $CHAPTER_COUNT"
+
+          # Build one short per chapter
+          for ch in $(seq 1 $CHAPTER_COUNT); do
+            echo "--- Building short for chapter $ch ---"
+            python src/video/build_shorts.py \
+              --pages-dir    "episode_pages_ch${ch}" \
+              --audio-dir    "pipeline/ch${ch}/audio" \
+              --scripts      "pipeline/ch${ch}/scripts.json" \
+              --output-dir   "$SHORTS_DIR" \
+              --manhwa       "$MANHWA" \
+              --episode      "$EP" \
+              --chapter      "$ch" \
+              --manifest     "pipeline/ch${ch}/manifest.json"
+          done
+
+          # Build combined full episode
+          echo "--- Building full episode ($CHAPTER_COUNT chapters combined) ---"
+          python src/video/build_full_episode.py \
+            --manhwa     "$MANHWA" \
+            --episode    "$EP" \
+            --output     "./output/full_episode_ep${EP}.mp4" \
+            --shorts-dir "$SHORTS_DIR" \
+            --chapters   "$CHAPTER_COUNT"
 
       - name: 💾 Commit series memory back to repo
         run: |
