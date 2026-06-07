@@ -1,12 +1,14 @@
 {
   "manhwa": "The Greatest Estate Developer",
   "episodes_done": [
-    1
+    1,
+    2
   ],
   "characters": [
     "Lloyd",
-    "Javier"
+    "Javier",
+    "Sir Neumann"
   ],
-  "story_so_far": "In a medieval fantasy world, Lloyd, a young noble man, finds himself in an unexpected predicament. He wakes up in an unfamiliar setting with a throbbing jaw and recalls a night of heavy drinking. Lloyd is aided by Javier, a stoic and efficient man, who helps him navigate the situation and warns him of the consequences of his actions. As Lloyd tries to piece together the events, he worries about his family's debt and the situation unfolds.",
-  "last_hook": "Lloyd's mind reels as he tries to piece together the events that led him to this point, specifically recalling 'just last night, in my microscopic boa'"
+  "story_so_far": "In a medieval fantasy world, Lloyd, a young noble man, is involved in a series of unexpected events. He wakes up in an unfamiliar setting with a throbbing jaw and recalls a night of heavy drinking. Lloyd is aided by Javier, a stoic and efficient man, who helps him navigate the situation and warns him of the consequences of his actions. Lloyd tries to piece together the events and worries about his family's debt as the situation unfolds. He ultimately faces off against Sir Neumann in a duel, using his wits and a shovel to emerge victorious, showcasing his resourcefulness and quick thinking.",
+  "last_hook": "Lloyd stands victorious, having defeated Sir Neumann in a duel, but the crowd's reaction and the consequences of this victory remain to be seen."
 }
