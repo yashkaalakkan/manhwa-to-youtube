@@ -150,83 +150,86 @@ def generate_ass_subtitles(
     height: int = SHORT_HEIGHT,
 ) -> None:
     """
-    Word-level karaoke subtitles matching the reference image style:
-    - Inactive words: white text, black outline
-    - Active word: white bold text inside a solid coloured highlight box
-    - Box implemented with BorderStyle=3 + BackColour in the active word's style override
-    - Window of 5 words shown at a time, active word centred when possible
-    - Each dialogue line covers exactly one word's display window (start→next word start)
+    Karaoke subtitles matching Instagram Reels / TikTok style (reference images 2 & 3):
+    - ALL words on the line shown simultaneously
+    - Active word: solid purple/violet filled box behind it, white bold text
+    - Inactive words: white bold text, black outline, no box
+    - Window of 4 words per line, active word position fixed in window
+    - Two separate Styles: one for inactive (BorderStyle=1), one for active (BorderStyle=3)
+    - Each dialogue event covers exactly one word duration (start → next word start)
+    - Subtitles positioned in upper-third of frame (not bottom) like the reference
     """
     font_path = find_font()
     font_name = "NotoSans Bold"
     if font_path:
-        font_name = Path(font_path).stem.replace("-", " ").replace("_", " ")
+        stem = Path(font_path).stem
+        font_name = stem.replace("-", " ").replace("_", " ")
 
-    # Base style: white text, black outline, no box (BorderStyle=1)
-    header = f"""\
-[Script Info]
-ScriptType: v4.00+
-PlayResX: {width}
-PlayResY: {height}
-ScaledBorderAndShadow: yes
+    # Y position — upper third like reference images (not bottom)
+    sub_margin_v = int(height * 0.12)   # 12% from top edge
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{font_size},{INACTIVE_TEXT},{INACTIVE_TEXT},{INACTIVE_OUTLINE},&H00000000,-1,0,0,0,100,100,2,0,1,3,0,2,40,40,{SUBTITLE_Y_MARGIN},1
+    # Two styles:
+    #   Word    — inactive: white text, thick black outline, no box
+    #   WordHL  — active:   white bold text, solid box (BorderStyle=3, BackColour=purple)
+    header = (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {width}\n"
+        f"PlayResY: {height}\n"
+        "ScaledBorderAndShadow: yes\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        # Inactive words: white, black outline, BorderStyle=1 (outline only, no box)
+        f"Style: Word,{font_name},{font_size},"
+        f"&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
+        f"-1,0,0,0,100,100,1,0,1,4,0,8,30,30,{sub_margin_v},1\n"
+        # Active word: white, BorderStyle=3 = opaque box, BackColour = purple
+        f"Style: WordHL,{font_name},{font_size},"
+        f"&H00FFFFFF,&H00FFFFFF,&H00C832C8,&H00C832C8,"
+        f"-1,0,0,0,100,100,1,0,3,6,0,8,30,30,{sub_margin_v},1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
 
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
     events = []
-    WINDOW = 5
+    WINDOW = 4   # 4 words visible at once — matches reference style
 
     for i, word in enumerate(words):
         t_start = word["start"]
-        # Hold until next word starts (keeps text on screen through pauses)
-        t_end = words[i + 1]["start"] if i + 1 < len(words) else total_duration
-        t_end = max(t_end, word["end"] + 0.05)   # always at least word's own end + tiny buffer
+        t_end   = words[i + 1]["start"] if i + 1 < len(words) else total_duration
+        t_end   = max(t_end, word["end"] + 0.05)
 
-        # 5-word sliding window, active word as centred as possible
-        half   = WINDOW // 2
-        win_s  = max(0, i - half)
-        win_e  = min(len(words), win_s + WINDOW)
-        win_s  = max(0, win_e - WINDOW)   # re-anchor if we hit the end
+        # Build window: keep active word at position 1 (second slot) when possible
+        win_s = max(0, i - 1)
+        win_e = min(len(words), win_s + WINDOW)
+        win_s = max(0, win_e - WINDOW)
         window = words[win_s:win_e]
 
+        # Each word is its own Dialogue event on the correct style
+        # We stack them horizontally using \pos — but ASS doesn't do inline
+        # horizontal layout easily, so we use a single line with style overrides:
+        # inactive words use \r (reset to Word style), active uses \rWordHL
         parts = []
         for j, w in enumerate(window):
-            global_idx = win_s + j
+            gidx = win_s + j
             text = w["word"].upper()
-
-            if global_idx == i:
-                # ── ACTIVE word: solid highlight box ─────────────────────
-                # \bord0\shad0     → remove outline/shadow from THIS word
-                # \3c{BOX}         → outline colour = box colour (fills box)
-                # \4c{BOX}         → shadow colour  = box colour (fills box shadow area)
-                # \1c{WHITE}       → text colour white
-                # \b1              → bold
-                # \p0 / BorderStyle override via style reset doesn't work inline,
-                # so we use the well-known trick: set \bord to a small positive
-                # value + BorderStyle3 equivalent is achieved by \3c=\4c=box colour.
-                # The most reliable cross-renderer approach is: \bord4\shad0\3c\4c.
-                parts.append(
-                    f"{{\\bord6\\shad0"
-                    f"\\3c{HIGHLIGHT_BOX}\\4c{HIGHLIGHT_BOX}"
-                    f"\\1c{HIGHLIGHT_TEXT}\\b1}}"
-                    f"{text}"
-                    f"{{\\r}}"
-                )
+            if gidx == i:
+                # Active: switch to WordHL style (opaque box), bold
+                parts.append(f"{{\rWordHL\b1}}{text}{{\r\b0}}")
             else:
-                # ── INACTIVE word: white text, black outline, no box ──────
-                parts.append(
-                    f"{{\\bord3\\shad0\\1c{INACTIVE_TEXT}\\3c{INACTIVE_OUTLINE}\\b0}}"
-                    f"{text}"
-                )
+                # Inactive: Word style (outline only)
+                parts.append(f"{{\rWord}}{text}")
 
-        line = "  ".join(parts)   # double-space between words for readability
+        line = " ".join(parts)
+        # Emit as Word style base (inactive); active word overrides inline
         events.append(
             f"Dialogue: 0,{_ass_time(t_start)},{_ass_time(t_end)},"
-            f"Default,,0,0,0,,{line}\n"
+            f"Word,,0,0,0,,{line}\n"
         )
 
     output_path.write_text(header + "".join(events), encoding="utf-8")

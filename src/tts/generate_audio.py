@@ -64,31 +64,44 @@ def generate_tts(kokoro, narration: str, voice: str, output_path: Path, language
     return len(samples) / sample_rate
 
 
-def align_with_whisperx(audio_path: Path, narration: str, language: str):
+def align_with_stable_ts(audio_path: Path, narration: str, language: str):
+    """
+    Use stable-ts (tiny Whisper, CPU) for accurate word-level timestamps.
+    Lightweight (~50MB), fast (~10s per 60s clip), genuinely frame-accurate.
+    Falls back to proportional if it fails.
+    """
     try:
-        import whisperx
-        print(f"    [WhisperX] Loading model (small, no drift mode)...")
-        model  = whisperx.load_model("small", "cpu", compute_type="int8", language=language[:2])
-        audio  = whisperx.load_audio(str(audio_path))
-        result = model.transcribe(audio, batch_size=8, language=language[:2])
-        model_a, meta = whisperx.load_align_model(language_code=language[:2], device="cpu")
-        aligned = whisperx.align(result["segments"], model_a, meta, audio, "cpu",
-                                 return_char_alignments=False)
-        words = []
-        for seg in aligned.get("word_segments", []):
-            w = seg.get("word", "").strip()
-            clean = re.sub(r"[^\w']", "", w)
-            if clean:
-                words.append({"word": clean,
-                               "start": round(seg.get("start", 0), 3),
-                               "end":   round(seg.get("end",   0), 3)})
-        if words:
-            print(f"    [WhisperX] ✅ Aligned {len(words)} words (drift-free)")
-            return words
+        import stable_whisper
     except ImportError:
-        print(f"    [WhisperX] Not installed — using proportional estimation")
+        print("    [stable-ts] Not installed — installing...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "stable-ts", "-q"],
+                       capture_output=True)
+        try:
+            import stable_whisper
+            print("    [stable-ts] Installed ✅")
+        except ImportError:
+            print("    [stable-ts] Install failed — using proportional estimation")
+            return None
+    try:
+        print("    [stable-ts] Aligning with tiny Whisper (CPU)...")
+        model  = stable_whisper.load_model("tiny", device="cpu")
+        result = model.align(str(audio_path), narration, language=language[:2])
+        words  = []
+        for seg in result.segments:
+            for w in getattr(seg, "words", []):
+                clean = re.sub(r"[^\w']", "", getattr(w, "word", "").strip())
+                if clean:
+                    words.append({
+                        "word":  clean,
+                        "start": round(float(w.start), 3),
+                        "end":   round(float(w.end),   3),
+                    })
+        if words:
+            print(f"    [stable-ts] ✅ Aligned {len(words)} words (frame-accurate)")
+            return words
+        print("    [stable-ts] No words returned — using proportional estimation")
     except Exception as e:
-        print(f"    [WhisperX] Failed ({e}) — using proportional estimation")
+        print(f"    [stable-ts] Failed ({e}) — using proportional estimation")
     return None
 
 
@@ -119,7 +132,7 @@ def process_narration(kokoro, narration: str, voice: str, audio_path: Path, lang
         return {"duration": 1.0, "words": [], "audio_path": str(audio_path)}
     duration = generate_tts(kokoro, narration, voice, audio_path, language)
     print(f"    [TTS] {duration:.1f}s audio generated")
-    words = align_with_whisperx(audio_path, narration, language)
+    words = align_with_stable_ts(audio_path, narration, language)
     if words is None:
         words = proportional_timestamps(narration, duration)
         print(f"    [TTS] Proportional timestamps: {len(words)} words")
@@ -144,18 +157,7 @@ def main():
     print(f"[TTS] Loading Kokoro...")
     kokoro = load_kokoro()
 
-    try:
-        import whisperx
-        print("[TTS] WhisperX available — drift-free forced alignment ✅")
-    except ImportError:
-        print("[TTS] WhisperX not found — installing...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "whisperx", "-q"],
-                       capture_output=True)
-        try:
-            import whisperx
-            print("[TTS] WhisperX installed ✅")
-        except ImportError:
-            print("[TTS] WhisperX install failed — will use proportional estimation")
+    print("[TTS] Word alignment: stable-ts (tiny Whisper, CPU) — installs on first run")
 
     timing_data = {"shorts": [], "full_episode_chunk": None}
 

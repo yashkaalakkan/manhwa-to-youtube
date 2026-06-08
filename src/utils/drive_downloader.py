@@ -241,7 +241,7 @@ def main():
     print(f"[Drive] Splitting pages into panels...")
     sys.path.insert(0, str(Path(__file__).parent))
     from panel_splitter import split_all_pages
-    panels_dir = output_dir.parent / "episode_panels"
+    panels_dir = output_dir / "panels"
     all_panels, panel_map = split_all_pages(page_paths, panels_dir, skip_pages)
 
     # Update manifest with panel info

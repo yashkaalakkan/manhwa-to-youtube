@@ -15,6 +15,7 @@ opencv-python-headless>=4.8.1
 
 # AI / Script generation
 groq>=0.4.2
+stable-ts>=2.17.0
 google-generativeai>=0.8.0
 
 # TTS - Kokoro
