@@ -2,13 +2,15 @@
   "manhwa": "The Greatest Estate Developer",
   "episodes_done": [
     1,
-    2
+    2,
+    3
   ],
   "characters": [
     "Lloyd",
     "Javier",
+    "Sarah",
     "Sir Neumann"
   ],
-  "story_so_far": "In a medieval fantasy world, Lloyd, a young noble man, is involved in a series of unexpected events. He wakes up in an unfamiliar setting with a throbbing jaw and recalls a night of heavy drinking. Lloyd is aided by Javier, a stoic and efficient man, who helps him navigate the situation and warns him of the consequences of his actions. Lloyd tries to piece together the events and worries about his family's debt as the situation unfolds. He ultimately faces off against Sir Neumann in a duel, using his wits and a shovel to emerge victorious, showcasing his resourcefulness and quick thinking.",
-  "last_hook": "Lloyd stands victorious, having defeated Sir Neumann in a duel, but the crowd's reaction and the consequences of this victory remain to be seen."
+  "story_so_far": "In a medieval fantasy world, Lloyd, a young noble man, finds himself entangled in a series of unexpected events. Waking up in an unfamiliar setting with a throbbing jaw, Lloyd recalls a night of heavy drinking. He's aided by Javier, a stoic and efficient man, who helps him navigate the situation and warns him of the consequences of his actions. Lloyd tries to piece together the events and worries about his family's debt as the situation unfolds. He faces off against Sir Neumann in a duel, using his wits and a shovel to emerge victorious. Lloyd and Javier navigate a collapsing mine, narrowly escaping a devastating explosion, with Javier shielding Lloyd from the blast, showcasing his unwavering dedication. The weight of their situation hangs in the balance as they search for a way out, and a deeper bond forms between them.",
+  "last_hook": "The weight of their situation hangs in the balance as they search for a way out, and a deeper bond forms between Lloyd and Javier."
 }
