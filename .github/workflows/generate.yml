@@ -124,6 +124,7 @@ jobs:
             "${{ github.event.inputs.manhwa_name }}" \
             "${{ github.event.inputs.episode_number }}" \
             "$CH_NUM" \
+            "1" \
             "${{ github.event.inputs.drive_file_link }}" \
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \
@@ -143,6 +144,7 @@ jobs:
             "${{ github.event.inputs.manhwa_name }}" \
             "${{ github.event.inputs.episode_number }}" \
             "$CH_NUM" \
+            "2" \
             "${{ github.event.inputs.drive_file_link_2 }}" \
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \
@@ -162,6 +164,7 @@ jobs:
             "${{ github.event.inputs.manhwa_name }}" \
             "${{ github.event.inputs.episode_number }}" \
             "$CH_NUM" \
+            "3" \
             "${{ github.event.inputs.drive_file_link_3 }}" \
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \
@@ -181,6 +184,7 @@ jobs:
             "${{ github.event.inputs.manhwa_name }}" \
             "${{ github.event.inputs.episode_number }}" \
             "$CH_NUM" \
+            "4" \
             "${{ github.event.inputs.drive_file_link_4 }}" \
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \
@@ -200,6 +204,7 @@ jobs:
             "${{ github.event.inputs.manhwa_name }}" \
             "${{ github.event.inputs.episode_number }}" \
             "$CH_NUM" \
+            "5" \
             "${{ github.event.inputs.drive_file_link_5 }}" \
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \

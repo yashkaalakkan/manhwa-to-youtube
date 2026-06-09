@@ -2,26 +2,29 @@
 # process_chapter.sh
 # Handles ONE chapter: download → OCR → script (1 short) → TTS
 # Does NOT build any video — that happens after all chapters are done.
-# Usage: process_chapter.sh <manhwa> <episode> <chapter_num> <drive_link> <cover_link> <language> <skip_pages>
+# Usage: process_chapter.sh <manhwa> <episode> <chapter_num> <slot> <drive_link> <cover_link> <language> <skip_pages>
+# chapter_num = actual chapter number (e.g. 16) used in metadata/titles
+# slot        = position in this run (1–5) used for directory naming (always pipeline/ch1–ch5)
 set -euo pipefail
 
 MANHWA="$1"
 EPISODE="$2"
-CHAPTER="$3"
-DRIVE_LINK="$4"
-COVER_LINK="${5:-}"
-LANGUAGE="${6:-en}"
-SKIP_PAGES="${7:-auto}"
+CHAPTER="$3"          # actual chapter number — passed to scripts for titles/metadata
+SLOT="$4"             # slot 1-5 — used for pipeline/pages directory names
+DRIVE_LINK="${5:-}"
+COVER_LINK="${6:-}"
+LANGUAGE="${7:-en}"
+SKIP_PAGES="${8:-auto}"
 
-PAGES_DIR="./episode_pages_ch${CHAPTER}"
-PIPELINE_DIR="./pipeline/ch${CHAPTER}"
+PAGES_DIR="./episode_pages_ch${SLOT}"
+PIPELINE_DIR="./pipeline/ch${SLOT}"
 AUDIO_DIR="${PIPELINE_DIR}/audio"
 
 mkdir -p "$PAGES_DIR" "$PIPELINE_DIR"
 
 echo ""
 echo "════════════════════════════════════════════════"
-echo " Chapter ${CHAPTER} | Episode ${EPISODE} | ${MANHWA}"
+echo " Chapter ${CHAPTER} (slot ${SLOT}) | Episode ${EPISODE} | ${MANHWA}"
 echo "════════════════════════════════════════════════"
 
 # ── 1. Download + convert PDF ────────────────────────────────────────────
