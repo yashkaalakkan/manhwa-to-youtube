@@ -3,14 +3,17 @@
   "episodes_done": [
     1,
     2,
-    3
+    3,
+    4
   ],
   "characters": [
     "Lloyd",
     "Javier",
     "Sarah",
-    "Sir Neumann"
+    "Sir Neumann",
+    "Arosh",
+    "Lord"
   ],
-  "story_so_far": "In a medieval fantasy world, Lloyd, a young noble man, finds himself entangled in a series of unexpected events. Waking up in an unfamiliar setting with a throbbing jaw, Lloyd recalls a night of heavy drinking. He's aided by Javier, a stoic and efficient man, who helps him navigate the situation and warns him of the consequences of his actions. Lloyd tries to piece together the events and worries about his family's debt as the situation unfolds. He faces off against Sir Neumann in a duel, using his wits and a shovel to emerge victorious. Lloyd and Javier navigate a collapsing mine, narrowly escaping a devastating explosion, with Javier shielding Lloyd from the blast, showcasing his unwavering dedication. The weight of their situation hangs in the balance as they search for a way out, and a deeper bond forms between them.",
-  "last_hook": "The weight of their situation hangs in the balance as they search for a way out, and a deeper bond forms between Lloyd and Javier."
+  "story_so_far": "In a medieval fantasy world, Lloyd, a young noble man, finds himself entangled in a series of unexpected events after waking up in an unfamiliar setting with a throbbing jaw. He's aided by Javier, a stoic and efficient man, who helps him navigate the situation and warns him of the consequences of his actions. Lloyd recalls a night of heavy drinking and worries about his family's debt as the situation unfolds. He faces off against Sir Neumann in a duel, using his wits and a shovel to emerge victorious. Lloyd and Javier navigate a collapsing mine, narrowly escaping a devastating explosion, with Javier shielding Lloyd from the blast, showcasing his unwavering dedication. They then face off against an irate lord, who accuses Lloyd of being a serial murderer and forces him to surrender his tools for sorcery. The lord's demeanor shifts, and he patronizingly tells Lloyd to forgive him, leaving Lloyd to wonder what will happen next.",
+  "last_hook": "The words hang in the air like a challenge, waiting for Lloyd to respond."
 }
