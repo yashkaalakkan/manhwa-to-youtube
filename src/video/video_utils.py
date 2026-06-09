@@ -96,13 +96,21 @@ def prepare_cover_image(
     w, h = width, height
 
     if cover_image_path and Path(cover_image_path).exists():
-        base  = Image.open(cover_image_path).convert("RGB")
-        ratio = max(w / base.width, h / base.height)
-        base  = base.resize((int(base.width * ratio), int(base.height * ratio)), Image.LANCZOS)
-        bx    = (base.width  - w) // 2
-        by    = (base.height - h) // 2
-        base  = base.crop((bx, by, bx + w, by + h))
+        try:
+            base  = Image.open(cover_image_path).convert("RGB")
+            ratio = max(w / base.width, h / base.height)
+            base  = base.resize((int(base.width * ratio), int(base.height * ratio)), Image.LANCZOS)
+            bx    = (base.width  - w) // 2
+            by    = (base.height - h) // 2
+            base  = base.crop((bx, by, bx + w, by + h))
+            print(f"  [Cover] ✅ Using provided cover image ({base.width}×{base.height})")
+        except Exception as e:
+            print(f"  [Cover] ⚠️  Cover image failed to load ({e}) — using gradient fallback")
+            cover_image_path = None
+            base = Image.new("RGB", (w, h))
     else:
+        if cover_image_path:
+            print(f"  [Cover] ⚠️  Cover image not found at: {cover_image_path} — using gradient fallback")
         base = Image.new("RGB", (w, h))
         px   = base.load()
         for py_i in range(h):
@@ -150,27 +158,30 @@ def generate_ass_subtitles(
     height: int = SHORT_HEIGHT,
 ) -> None:
     """
-    Karaoke subtitles matching Instagram Reels / TikTok style (reference images 2 & 3):
-    - ALL words on the line shown simultaneously
-    - Active word: solid purple/violet filled box behind it, white bold text
-    - Inactive words: white bold text, black outline, no box
-    - Window of 4 words per line, active word position fixed in window
-    - Two separate Styles: one for inactive (BorderStyle=1), one for active (BorderStyle=3)
-    - Each dialogue event covers exactly one word duration (start → next word start)
-    - Subtitles positioned in upper-third of frame (not bottom) like the reference
+    Karaoke word-highlight subtitles — TikTok/Reels style:
+    - 4 words visible at once on one line
+    - Active word: solid purple box behind it, white bold text
+    - Inactive words: white bold text, black outline
+    - Positioned upper-third of frame
+    - { and } in text are escaped so libass doesn't treat them as tags
+    
+    Implementation: uses TWO styles defined in header.
+      "Base" — inactive style (BorderStyle=1, outline only)
+      "HL"   — active style   (BorderStyle=3, opaque box)
+    Each dialogue line = one word's worth of display time.
+    Active word switches to HL style inline via {\rHL}, rest stay Base.
     """
     font_path = find_font()
-    font_name = "NotoSans Bold"
+    font_name = "Noto Sans Bold"
     if font_path:
         stem = Path(font_path).stem
         font_name = stem.replace("-", " ").replace("_", " ")
 
-    # Y position — upper third like reference images (not bottom)
-    sub_margin_v = int(height * 0.12)   # 12% from top edge
+    sub_margin_v = max(80, int(height * 0.10))
 
-    # Two styles:
-    #   Word    — inactive: white text, thick black outline, no box
-    #   WordHL  — active:   white bold text, solid box (BorderStyle=3, BackColour=purple)
+    # Inactive style: white text, thick black outline, no box
+    # Active  style: white text, purple opaque box (BorderStyle=3)
+    # Alignment=8 = top-center
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
@@ -183,59 +194,54 @@ def generate_ass_subtitles(
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        # Inactive words: white, black outline, BorderStyle=1 (outline only, no box)
-        f"Style: Word,{font_name},{font_size},"
-        f"&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
-        f"-1,0,0,0,100,100,1,0,1,4,0,8,30,30,{sub_margin_v},1\n"
-        # Active word: white, BorderStyle=3 = opaque box, BackColour = purple
-        f"Style: WordHL,{font_name},{font_size},"
-        f"&H00FFFFFF,&H00FFFFFF,&H00C832C8,&H00C832C8,"
-        f"-1,0,0,0,100,100,1,0,3,6,0,8,30,30,{sub_margin_v},1\n"
+        # Base: white, black outline, BorderStyle=1
+        f"Style: Base,{font_name},{font_size},"
+        "&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
+        f"-1,0,0,0,100,100,2,0,1,4,0,8,40,40,{sub_margin_v},1\n"
+        # HL: white bold, purple box, BorderStyle=3
+        f"Style: HL,{font_name},{font_size},"
+        "&H00FFFFFF,&H00FFFFFF,&H00C832C8,&H00C832C8,"
+        f"-1,0,0,0,100,100,2,0,3,4,0,8,40,40,{sub_margin_v},1\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
 
+    def _safe(text: str) -> str:
+        """Escape { and } so libass doesn't eat them as override tags."""
+        return text.replace("{", "\\{").replace("}", "\\}")
+
     events = []
-    WINDOW = 4   # 4 words visible at once — matches reference style
+    WINDOW = 4
 
     for i, word in enumerate(words):
         t_start = word["start"]
         t_end   = words[i + 1]["start"] if i + 1 < len(words) else total_duration
         t_end   = max(t_end, word["end"] + 0.05)
 
-        # Build window: keep active word at position 1 (second slot) when possible
         win_s = max(0, i - 1)
         win_e = min(len(words), win_s + WINDOW)
         win_s = max(0, win_e - WINDOW)
         window = words[win_s:win_e]
 
-        # Each word is its own Dialogue event on the correct style
-        # We stack them horizontally using \pos — but ASS doesn't do inline
-        # horizontal layout easily, so we use a single line with style overrides:
-        # inactive words use \r (reset to Word style), active uses \rWordHL
         parts = []
         for j, w in enumerate(window):
             gidx = win_s + j
-            text = w["word"].upper()
+            text = _safe(w["word"].upper())
             if gidx == i:
-                # Active: switch to WordHL style (opaque box), bold
-                parts.append(f"{{\rWordHL\b1}}{text}{{\r\b0}}")
+                # Switch to HL style for this word, then reset back to Base
+                parts.append(f"{{\\rHL\\b1}}{text}{{\\rBase}}")
             else:
-                # Inactive: Word style (outline only)
-                parts.append(f"{{\rWord}}{text}")
+                parts.append(f"{{\\rBase}}{text}")
 
         line = " ".join(parts)
-        # Emit as Word style base (inactive); active word overrides inline
         events.append(
             f"Dialogue: 0,{_ass_time(t_start)},{_ass_time(t_end)},"
-            f"Word,,0,0,0,,{line}\n"
+            f"Base,,0,0,0,,{line}\n"
         )
 
     output_path.write_text(header + "".join(events), encoding="utf-8")
 
-
-# ── FFmpeg video builder ─────────────────────────────────────────────────────
 
 def build_video_ffmpeg(
     page_images: List[Path],

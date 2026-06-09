@@ -146,12 +146,48 @@ def build_full_episode(
 
 
 def build_compilation(short_video_paths: list, output_path: Path,
-                      manhwa: str, episode: int, compilation_num: int) -> None:
-    """Concatenate multiple short videos into one landscape compilation."""
+                      manhwa: str, episode: int, compilation_num: int,
+                      gap_seconds: float = 0.9) -> None:
+    """
+    Concatenate short videos into one compilation with a black gap between each.
+    gap_seconds: silence+black pause inserted between each short (default 0.9s)
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmp      = Path(tmpdir)
+        tmp = Path(tmpdir)
+
+        # Get dimensions from first video
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "csv=p=0", str(short_video_paths[0])],
+            capture_output=True, text=True
+        )
+        w, h = (1080, 1920)  # portrait default
+        if probe.returncode == 0 and probe.stdout.strip():
+            try:
+                parts = probe.stdout.strip().split(",")
+                w, h  = int(parts[0]), int(parts[1])
+            except Exception:
+                pass
+
+        # Create a black gap video
+        gap_path = tmp / "gap.mp4"
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"color=black:s={w}x{h}:r=30:d={gap_seconds}",
+            "-f", "lavfi", "-i", f"aevalsrc=0:c=stereo:s=44100:d={gap_seconds}",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            str(gap_path),
+        ], capture_output=True)
+
+        # Build concat list: short, gap, short, gap, ..., short (no trailing gap)
         listfile = tmp / "concat.txt"
-        lines    = [f"file '{p.resolve()}'\n" for p in short_video_paths]
+        lines = []
+        for i, p in enumerate(short_video_paths):
+            lines.append(f"file '{p.resolve()}'\n")
+            if i < len(short_video_paths) - 1:
+                lines.append(f"file '{gap_path.resolve()}'\n")
         listfile.write_text("".join(lines), encoding="utf-8")
 
         cmd = [
@@ -168,7 +204,7 @@ def build_compilation(short_video_paths: list, output_path: Path,
         if result.returncode != 0:
             raise RuntimeError(f"FFmpeg concat failed:\n{result.stderr[-3000:]}")
 
-    print(f"[Compile] ✅ Compilation {compilation_num} ({len(short_video_paths)} shorts) → {output_path}")
+    print(f"[Compile] ✅ Compilation {compilation_num} ({len(short_video_paths)} shorts, {gap_seconds}s gaps) → {output_path}")
 
 
 def main():
@@ -249,26 +285,26 @@ def main():
             if td.get("full_episode_chunk"):
                 chunk_timings.append(td["full_episode_chunk"])
 
-    print(f"[FullEp] {len(all_pages)} total panels from {args.chapters} chapters")
-
-    # ── Concatenate audio ─────────────────────────────────────────────────
-    combined_audio = output_path.parent / "full_episode_combined.wav"
-    audio_duration, _ = concat_audio(chunk_audio_paths, combined_audio)
-
-    # ── Merge word timings ────────────────────────────────────────────────
-    timing_words = merge_word_timings(chunk_timings)
-
-    # ── Build the full episode video ──────────────────────────────────────
-    build_full_episode(
-        all_pages=all_pages,
-        audio_path=combined_audio,
-        timing_words=timing_words,
-        output_path=output_path,
-        manhwa=args.manhwa,
-        episode=args.episode,
-        cover_image=cover_image,
-        audio_duration=audio_duration,
+    # ── Full episode = all shorts concatenated with 0.9s black gap ────────
+    # Much simpler and more reliable than rebuilding video from panels+audio.
+    # Each short already has correct subtitles and audio — just join them.
+    shorts_dir_path = Path(args.shorts_dir)
+    short_files_for_ep = sorted(
+        shorts_dir_path.glob(f"short_ep{args.episode:02d}_ch*.mp4")
     )
+    if short_files_for_ep:
+        print(f"[FullEp] Building full episode from {len(short_files_for_ep)} shorts (0.9s gaps)")
+        build_compilation(
+            short_video_paths = short_files_for_ep,
+            output_path       = output_path,
+            manhwa            = args.manhwa,
+            episode           = args.episode,
+            compilation_num   = 0,
+            gap_seconds       = 0.9,
+        )
+    else:
+        print(f"[FullEp] ⚠️  No short files found — full episode video not built")
+        return
 
     # ── Update series memory with full episode narration ──────────────────
     groq_api_key = args.groq_api_key or os.environ.get("GROQ_API_KEY", "")

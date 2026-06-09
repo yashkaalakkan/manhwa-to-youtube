@@ -55,6 +55,47 @@ def get_file_name(file_id: str, api_key: str) -> str:
     return resp.json().get("name", "episode.pdf")
 
 
+def _download_image(file_id: str, dest_path: Path, api_key: str) -> None:
+    """
+    Download an image file from Google Drive and verify it opens correctly.
+    Uses the same download mechanism as download_pdf but validates the result
+    is a real image (not an HTML error/login page).
+    """
+    import io
+    # Try direct download URL first
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    session = requests.Session()
+    resp = session.get(url, stream=True, timeout=60)
+
+    # Handle Google's confirmation page (large files)
+    if "Content-Disposition" not in resp.headers:
+        token = None
+        for key, val in resp.cookies.items():
+            if key.startswith("download_warning"):
+                token = val
+                break
+        if token:
+            resp = session.get(url, params={"confirm": token}, stream=True, timeout=120)
+
+    resp.raise_for_status()
+    raw = b"".join(resp.iter_content(chunk_size=1024 * 1024))
+
+    # Verify it's a valid image before saving
+    try:
+        from PIL import Image as _Image
+        img = _Image.open(io.BytesIO(raw)).convert("RGB")
+        img.save(str(dest_path), "JPEG", quality=95)
+        print(f"[Drive] Cover verified: {img.width}×{img.height}px")
+    except Exception:
+        # Fallback: try thumbnail URL which always returns an image
+        thumb_url = f"https://drive.google.com/thumbnail?id={file_id}&sz=w1080"
+        resp2 = requests.get(thumb_url, timeout=30)
+        resp2.raise_for_status()
+        img = _Image.open(io.BytesIO(resp2.content)).convert("RGB")
+        img.save(str(dest_path), "JPEG", quality=95)
+        print(f"[Drive] Cover via thumbnail: {img.width}×{img.height}px")
+
+
 def download_pdf(file_id: str, dest_path: Path, api_key: str) -> None:
     """Download a public Drive PDF file."""
     url = f"https://drive.google.com/uc?export=download&id={file_id}"
@@ -190,10 +231,10 @@ def main():
     cover_path = None
     if args.cover_link.strip():
         try:
-            cover_id = extract_file_id(args.cover_link)
+            cover_id   = extract_file_id(args.cover_link)
             cover_dest = output_dir / "cover.jpg"
             print(f"[Drive] Downloading cover image...")
-            download_pdf(cover_id, cover_dest, api_key)  # reuse downloader
+            _download_image(cover_id, cover_dest, api_key)
             cover_path = str(cover_dest)
             print(f"[Drive] Cover saved → {cover_dest}")
         except Exception as e:

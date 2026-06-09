@@ -11,6 +11,11 @@ on:
         description: "Episode number (e.g. 1)"
         required: true
         type: string
+      start_chapter:
+        description: "Starting chapter number for Chapter 1 link (e.g. 3 means Ch1=3, Ch2=4, Ch3=5...)"
+        required: false
+        default: "1"
+        type: string
       drive_file_link:
         description: "Public Google Drive link — Chapter 1 (required)"
         required: true
@@ -113,10 +118,12 @@ jobs:
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
+          START_CH="${{ github.event.inputs.start_chapter || '1' }}"
+          CH_NUM=$((START_CH + 0))
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
             "${{ github.event.inputs.episode_number }}" \
-            "1" \
+            "$CH_NUM" \
             "${{ github.event.inputs.drive_file_link }}" \
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \
@@ -130,10 +137,12 @@ jobs:
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
+          START_CH="${{ github.event.inputs.start_chapter || '1' }}"
+          CH_NUM=$((START_CH + 1))
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
             "${{ github.event.inputs.episode_number }}" \
-            "2" \
+            "$CH_NUM" \
             "${{ github.event.inputs.drive_file_link_2 }}" \
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \
@@ -147,10 +156,12 @@ jobs:
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
+          START_CH="${{ github.event.inputs.start_chapter || '1' }}"
+          CH_NUM=$((START_CH + 2))
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
             "${{ github.event.inputs.episode_number }}" \
-            "3" \
+            "$CH_NUM" \
             "${{ github.event.inputs.drive_file_link_3 }}" \
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \
@@ -164,10 +175,12 @@ jobs:
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
+          START_CH="${{ github.event.inputs.start_chapter || '1' }}"
+          CH_NUM=$((START_CH + 3))
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
             "${{ github.event.inputs.episode_number }}" \
-            "4" \
+            "$CH_NUM" \
             "${{ github.event.inputs.drive_file_link_4 }}" \
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \
@@ -181,10 +194,12 @@ jobs:
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
         run: |
+          START_CH="${{ github.event.inputs.start_chapter || '1' }}"
+          CH_NUM=$((START_CH + 4))
           bash .github/scripts/process_chapter.sh \
             "${{ github.event.inputs.manhwa_name }}" \
             "${{ github.event.inputs.episode_number }}" \
-            "5" \
+            "$CH_NUM" \
             "${{ github.event.inputs.drive_file_link_5 }}" \
             "${{ github.event.inputs.cover_image_link }}" \
             "${{ github.event.inputs.language }}" \
@@ -216,8 +231,10 @@ jobs:
           echo "Chapters processed: $CHAPTER_COUNT"
 
           # Build one short per chapter
+          START_CH="${{ github.event.inputs.start_chapter || '1' }}"
           for ch in $(seq 1 $CHAPTER_COUNT); do
-            echo "--- Building short for chapter $ch ---"
+            ACTUAL_CH=$((START_CH + ch - 1))
+            echo "--- Building short for chapter $ACTUAL_CH (slot $ch) ---"
             python src/video/build_shorts.py \
               --pages-dir  "episode_pages_ch${ch}" \
               --audio-dir  "pipeline/ch${ch}/audio" \
@@ -225,7 +242,7 @@ jobs:
               --output-dir "$SHORTS_DIR" \
               --manhwa     "$MANHWA" \
               --episode    "$EP" \
-              --chapter    "$ch" \
+              --chapter    "$ACTUAL_CH" \
               --manifest   "pipeline/ch${ch}/manifest.json"
           done
 

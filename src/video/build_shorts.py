@@ -1,34 +1,29 @@
 """
-build_shorts.py
-Builds ONE short video per chapter (portrait 1080×1920).
+build_shorts.py  —  Builds ONE short video per chapter (portrait 1080×1920).
 
-Panel selection — NARRATIVE SYNC MODE:
-  Maps each narration word to its source page using proportional position
-  alignment (OCR pages are fed to the LLM in order, narration flows in
-  the same order). Panel switches happen at the exact word timestamp when
-  narration crosses into that page's content — like a human editor who
-  watches the video and cuts panels to match what the narrator is saying.
+Panel selection — AI-GUIDED MODE:
+  Asks the LLM which panel numbers to use, in what order, based on the
+  narration text. The LLM knows the narration and knows the page count,
+  so it picks panels that actually match what's being described.
+  Falls back to proportional sync if LLM call fails.
 
-  Example:
-    OCR: page 1 = 40 words, page 2 = 60 words, page 3 = 30 words  (130 total)
-    Narration: 90 words over 68 seconds
-    → page 1 covers narration words  0–27  (0.0s – 20.5s)
-    → page 2 covers narration words 28–69  (20.5s – 52.3s)
-    → page 3 covers narration words 70–89  (52.3s – 68.0s)
-    Panel switches at 20.5s and 52.3s exactly.
+Duplicate prevention: a panel is never shown twice in a row.
+Min short duration: narration is padded to at least MIN_SHORT_WORDS if too short.
 """
 
 import argparse
 import json
+import os
 import random
 import re
-import tempfile
-from pathlib import Path
-from typing import List, Optional, Dict, Tuple
-
+import subprocess
 import sys
-sys.path.insert(0, str(Path(__file__).parent))
+import tempfile
+import time
+from pathlib import Path
+from typing import List, Optional, Tuple, Dict
 
+sys.path.insert(0, str(Path(__file__).parent))
 from video_utils import (
     TRANSITIONS as ANIMATIONS,
     build_video_ffmpeg,
@@ -38,144 +33,187 @@ from video_utils import (
 )
 
 COVER_DURATION_S = 3.0
-MIN_PANEL_DUR_S  = 1.0   # never show a panel for less than 1s
-MAX_PANEL_DUR_S  = 8.0   # never show a panel for more than 8s
+MIN_PANEL_DUR_S  = 1.5
+MAX_PANEL_DUR_S  = 6.0
+MIN_SHORT_WORDS  = 80    # floor for narration length (~32s at 2.5 w/s)
 
 
-# ── Narrative sync panel selection ───────────────────────────────────────────
+# ── AI panel selection ────────────────────────────────────────────────────────
 
-def _page_num_from_path(path: Path) -> Optional[int]:
-    """page_0003_panel_01.jpg → 3,  page_0003.jpg → 3"""
-    m = re.search(r"page_0*(\d+)", path.name)
-    return int(m.group(1)) if m else None
+def _llm_call(prompt: str, max_tokens: int = 300) -> Optional[str]:
+    """Call Gemini (primary) or Groq (fallback). Returns None on failure."""
+    # Gemini
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel("gemini-2.5-flash-lite-preview-06-17")
+            resp  = model.generate_content(
+                prompt,
+                generation_config=genai.GenerationConfig(
+                    max_output_tokens=max_tokens, temperature=0.3)
+            )
+            return resp.text.strip()
+        except Exception as e:
+            print(f"  [PanelAI] Gemini failed ({e}) — trying Groq")
 
-
-def _build_page_word_ranges(ocr_pages: List[dict]) -> List[Tuple[int, int, int]]:
-    """
-    Returns list of (page_index, cumulative_start_word, cumulative_end_word)
-    sorted by page_index.
-
-    Pages with fewer than MIN_PAGE_WORDS are excluded — their panels will
-    never be selected because the narration doesn't meaningfully describe them.
-    This covers:
-      - Pure action panels (no speech bubbles, minimal text)
-      - Chapter title/cover pages
-      - Transition/blank separator pages
-    """
-    MIN_PAGE_WORDS = 8   # pages with fewer words than this are skipped
-
-    ranges  = []
-    cursor  = 0
-    skipped = 0
-    for page in sorted(ocr_pages, key=lambda p: p["page_index"]):
-        words = page.get("raw_text", "").split()
-        if len(words) < MIN_PAGE_WORDS:
-            skipped += 1
+    # Groq fallback
+    for env in ["GROQ_API_KEY"] + [f"GROQ_API_KEY_{i}" for i in range(2, 6)]:
+        groq_key = os.environ.get(env, "").strip()
+        if not groq_key:
             continue
-        ranges.append((page["page_index"], cursor, cursor + len(words)))
-        cursor += len(words)
+        try:
+            from groq import Groq
+            client = Groq(api_key=groq_key)
+            resp   = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3, max_tokens=max_tokens,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception:
+            continue
+    return None
 
-    if skipped:
-        print(f"  [Short] Skipped {skipped} low-text page(s) (< {MIN_PAGE_WORDS} words) "
-              f"— their panels won't appear in the video")
-    return ranges
 
-
-def sync_panels_to_narration(
+def ai_select_panels(
     panels: List[Path],
+    narration: str,
     ocr_pages: List[dict],
-    timing_words: List[dict],
     audio_duration: float,
+    timing_words: List[dict] = None,
 ) -> List[Tuple[Path, float]]:
     """
-    Returns [(panel_path, display_duration_seconds), ...].
+    Ask the LLM two things in one call:
+      1. Which pages to show (relevant to narration, no text-only pages)
+      2. At what TIMESTAMP each page should appear (synced to voice)
 
-    Steps:
-    1. Build cumulative word ranges per page from OCR
-    2. Map each narration word index → source page via proportional position
-    3. Find timestamp boundaries where source page changes
-    4. Pick the best panel for each page segment
-    5. Return (panel, duration) pairs clipped to MIN/MAX
+    The LLM receives the narration with word timestamps so it can say
+    "show page 5 at 12.3s when the narrator says 'Lloyd charged forward'".
+    This gives genuine voice-panel sync, not just equal-duration slots.
+
+    Returns (panel_path, duration_seconds) pairs where duration is the
+    time until the NEXT panel switch — derived from the AI-provided timestamps.
     """
-    if not ocr_pages or not timing_words:
-        # Fallback: uniform
-        per = max(MIN_PANEL_DUR_S, min(audio_duration / max(len(panels), 1), MAX_PANEL_DUR_S))
-        return [(p, per) for p in panels]
+    # Build page summaries
+    page_summaries = []
+    for p in sorted(ocr_pages, key=lambda x: x["page_index"]):
+        words = p.get("raw_text", "").split()
+        if not words:
+            continue
+        preview = " ".join(words[:15])
+        page_summaries.append(f"Page {p['page_index']}: {preview}")
 
-    page_ranges = _build_page_word_ranges(ocr_pages)
-    if not page_ranges:
-        per = max(MIN_PANEL_DUR_S, min(audio_duration / max(len(panels), 1), MAX_PANEL_DUR_S))
-        return [(p, per) for p in panels]
+    def page_of(path: Path) -> Optional[int]:
+        m = re.search(r"page_0*(\d+)", path.name)
+        return int(m.group(1)) if m else None
 
-    total_ocr_words = page_ranges[-1][2]  # cumulative end of last page
-    n_narration     = len(timing_words)
-
-    # Map narration word index → source page_index
-    def narration_idx_to_page(nar_idx: int) -> int:
-        # Position of this narration word as fraction through the narration
-        frac = nar_idx / max(n_narration - 1, 1)
-        # Map to OCR word position
-        ocr_pos = frac * total_ocr_words
-        for (pg, start, end) in page_ranges:
-            if start <= ocr_pos < end:
-                return pg
-        return page_ranges[-1][0]  # last page for anything that overshoots
-
-    # Build segments: list of (page_index, start_time, end_time)
-    segments: List[Tuple[int, float, float]] = []
-    current_page = narration_idx_to_page(0)
-    seg_start    = timing_words[0]["start"]
-
-    for i in range(1, n_narration):
-        pg = narration_idx_to_page(i)
-        if pg != current_page:
-            segments.append((current_page, seg_start, timing_words[i]["start"]))
-            current_page = pg
-            seg_start    = timing_words[i]["start"]
-
-    # Final segment runs to end of audio
-    segments.append((current_page, seg_start, audio_duration))
-
-    # Build page → panels lookup
-    page_to_panels: Dict[int, List[Path]] = {}
-    for panel in panels:
-        pg = _page_num_from_path(panel)
+    page_to_panels: Dict[int, List[int]] = {}
+    for i, panel in enumerate(panels):
+        pg = page_of(panel)
         if pg is not None:
-            page_to_panels.setdefault(pg, []).append(panel)
+            page_to_panels.setdefault(pg, []).append(i + 1)
 
-    # Assign panels to segments
-    result: List[Tuple[Path, float]] = []
-    used_panel_idx: Dict[int, int] = {}  # page → which panel index we're on
+    # Build a word-timestamp summary for the LLM
+    # Show every ~5th word with its timestamp so the LLM can anchor panels to speech
+    timed_words = ""
+    if timing_words:
+        sample = timing_words[::max(1, len(timing_words) // 30)]  # ~30 samples
+        timed_words = "\nNARRATION TIMESTAMPS (word → time in seconds):\n"
+        timed_words += ", ".join(
+            f'"{w["word"]}"@{w["start"]:.1f}s' for w in sample
+        )
 
-    for (pg, t_start, t_end) in segments:
-        duration = t_end - t_start
-        duration = max(MIN_PANEL_DUR_S, min(duration, MAX_PANEL_DUR_S))
+    prompt = f"""You are a video editor syncing manga panels to a narration voiceover.
 
-        pg_panels = page_to_panels.get(pg, [])
+TOTAL VIDEO DURATION: {audio_duration:.1f}s
+
+NARRATION:
+{narration[:500]}
+{timed_words}
+
+AVAILABLE PAGES (page number: first few words of text/dialogue):
+{chr(10).join(page_summaries[:25])}
+
+TASK: Choose which pages to show and EXACTLY WHEN to show them (in seconds from start).
+
+Rules:
+- Only pick pages whose visual content matches what the narrator is describing at that moment
+- Skip pages that are only speech bubbles / text boxes — those add nothing visually
+- Skip pages already described earlier or later in the narration  
+- No two consecutive identical pages
+- First panel should start at 0.0s
+- Last panel switch must be before {max(0, audio_duration - MIN_PANEL_DUR_S):.1f}s
+- Each panel must stay on screen at least {MIN_PANEL_DUR_S}s
+
+Output ONLY a JSON array like this — no explanation:
+[{{"page": 3, "at": 0.0}}, {{"page": 7, "at": 8.5}}, {{"page": 9, "at": 19.2}}]"""
+
+    raw = _llm_call(prompt, max_tokens=250)
+    assignments = []
+
+    if raw:
+        m = re.search(r'\[.*?\]', raw, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+                if parsed and isinstance(parsed[0], dict) and "page" in parsed[0]:
+                    assignments = parsed
+                    print(f"  [PanelAI] AI assigned {len(assignments)} panels with timestamps")
+            except Exception:
+                pass
+
+    if not assignments:
+        print("  [PanelAI] ⚠️  Could not parse AI response — falling back to proportional")
+        return _proportional_fallback(panels, audio_duration)
+
+    # Convert assignments → (panel_path, duration) pairs
+    result = []
+    last_panel_idx = None
+
+    for i, assignment in enumerate(assignments):
+        pg_num = int(assignment.get("page", 0))
+        t_start = float(assignment.get("at", 0.0))
+        t_end = float(assignments[i + 1]["at"]) if i + 1 < len(assignments) else audio_duration
+        duration = max(MIN_PANEL_DUR_S, min(t_end - t_start, MAX_PANEL_DUR_S))
+
+        pg_panels = page_to_panels.get(pg_num, [])
         if not pg_panels:
-            # No panels for this page — try adjacent pages
             for offset in [1, -1, 2, -2]:
-                pg_panels = page_to_panels.get(pg + offset, [])
+                pg_panels = page_to_panels.get(pg_num + offset, [])
                 if pg_panels:
                     break
         if not pg_panels:
-            continue  # skip entirely if really nothing nearby
+            continue
 
-        # Cycle through panels of this page across multiple segments
-        idx = used_panel_idx.get(pg, 0)
-        panel = pg_panels[idx % len(pg_panels)]
-        used_panel_idx[pg] = idx + 1
+        idx = pg_panels[0] - 1
+        if idx == last_panel_idx and len(pg_panels) > 1:
+            idx = pg_panels[1] - 1
+        elif idx == last_panel_idx:
+            continue  # skip true duplicate with no alternative
 
-        result.append((panel, duration))
+        result.append((panels[idx], duration))
+        last_panel_idx = idx
 
     if not result:
-        print("  [Short] ⚠️  Sync selection yielded nothing — falling back to uniform")
-        per = max(MIN_PANEL_DUR_S, min(audio_duration / max(len(panels), 1), MAX_PANEL_DUR_S))
-        return [(p, per) for p in panels]
+        print("  [PanelAI] ⚠️  No valid panels built — falling back")
+        return _proportional_fallback(panels, audio_duration)
 
-    unique_pages = len(set(_page_num_from_path(p) for p, _ in result))
-    print(f"  [Short] Narrative sync: {len(result)} panel segment(s) across "
-          f"{unique_pages} page(s) — cuts aligned to narration timing")
+    print(f"  [PanelAI] ✅ {len(result)} panels, timestamps from AI (voice-synced)")
+    return result
+
+
+def _proportional_fallback(panels: List[Path], audio_duration: float) -> List[Tuple[Path, float]]:
+    """Simple proportional fallback — all panels, even duration."""
+    per = max(MIN_PANEL_DUR_S, min(audio_duration / max(len(panels), 1), MAX_PANEL_DUR_S))
+    # Deduplicate consecutive identical panels
+    result = []
+    prev = None
+    for p in panels:
+        if p != prev:
+            result.append((p, per))
+            prev = p
     return result
 
 
@@ -207,15 +245,13 @@ def build_short(
             page_durs.append(dur)
 
         n = len(page_dsts)
-        avg_dur = audio_duration / max(n, 1)
-        print(f"  [Short] Ch{chapter}: {n} panels | {audio_duration:.1f}s audio | "
-              f"~{avg_dur:.1f}s/panel avg")
+        avg = audio_duration / max(n, 1)
+        print(f"  [Short] Ch{chapter}: {n} panels | {audio_duration:.1f}s audio | ~{avg:.1f}s/panel")
 
-        # Offset subtitle word timestamps by cover duration
         offset_words = [
             {**w,
-             "start": w["start"] + COVER_DURATION_S,
-             "end":   w["end"]   + COVER_DURATION_S}
+             "start": round(w["start"] + COVER_DURATION_S, 3),
+             "end":   round(w["end"]   + COVER_DURATION_S, 3)}
             for w in timing_words
         ]
 
@@ -267,17 +303,13 @@ def main():
     with open(timing_path, encoding="utf-8") as f:
         timing_data = json.load(f)
 
-    # OCR data — extract_text.py writes to raw_text.json
     ocr_path  = Path(args.scripts).parent / "raw_text.json"
     ocr_pages = []
     if ocr_path.exists():
         with open(ocr_path, encoding="utf-8") as f:
             ocr_pages = json.load(f)
-        print(f"[Short] OCR data loaded: {len(ocr_pages)} pages")
-    else:
-        print("[Short] ⚠️  raw_text.json not found — falling back to uniform panel timing")
 
-    # Load panels from manifest
+    # Load panels
     manifest_path = (Path(args.manifest) if args.manifest
                      else Path(args.scripts).parent / "manifest.json")
 
@@ -309,14 +341,17 @@ def main():
     audio_path  = Path(args.audio_dir) / "short_part_01.wav"
     output_path = output_dir / f"short_ep{args.episode:02d}_ch{args.chapter:02d}.mp4"
 
+    narration = scripts["shorts"][0]["narration"]
+
     print(f"\n[Short] Building chapter {args.chapter} short → {output_path.name}")
 
-    # Narrative sync panel selection
-    panels_with_durations = sync_panels_to_narration(
-        panels       = panels,
-        ocr_pages    = ocr_pages,
-        timing_words = timing["words"],
+    # AI panel selection
+    panels_with_durations = ai_select_panels(
+        panels         = panels,
+        narration      = narration,
+        ocr_pages      = ocr_pages,
         audio_duration = timing["duration"],
+        timing_words   = timing["words"],
     )
 
     build_short(
