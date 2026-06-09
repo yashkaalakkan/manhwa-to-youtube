@@ -33,8 +33,8 @@ from video_utils import (
 )
 
 COVER_DURATION_S = 3.0
-MIN_PANEL_DUR_S  = 1.5
-MAX_PANEL_DUR_S  = 6.0
+MIN_PANEL_DUR_S  = 2.0   # minimum seconds per panel
+MAX_PANEL_DUR_S  = 3.5   # maximum seconds per panel — keeps video dynamic
 MIN_SHORT_WORDS  = 80    # floor for narration length (~32s at 2.5 w/s)
 
 
@@ -125,6 +125,9 @@ def ai_select_panels(
             f'"{w["word"]}"@{w["start"]:.1f}s' for w in sample
         )
 
+    target_min = max(15, int(audio_duration / MAX_PANEL_DUR_S))
+    target_max = max(25, int(audio_duration / MIN_PANEL_DUR_S))
+
     prompt = f"""You are a video editor syncing manga panels to a narration voiceover.
 
 TOTAL VIDEO DURATION: {audio_duration:.1f}s
@@ -139,18 +142,18 @@ AVAILABLE PAGES (page number: first few words of text/dialogue):
 TASK: Choose which pages to show and EXACTLY WHEN to show them (in seconds from start).
 
 Rules:
-- Only pick pages whose visual content matches what the narrator is describing at that moment
-- Skip pages that are only speech bubbles / text boxes — those add nothing visually
-- Skip pages already described earlier or later in the narration  
+- TARGET: {target_min}–{target_max} panels total — each panel shows for ~2–3.5s, this keeps the video dynamic
+- If a page has good visual content, use it MULTIPLE TIMES at different timestamps as the narration revisits that scene
+- Only skip pages that are PURELY speech bubble text with zero visual scene content
 - No two consecutive identical pages
-- First panel should start at 0.0s
+- First panel must start at 0.0s
 - Last panel switch must be before {max(0, audio_duration - MIN_PANEL_DUR_S):.1f}s
-- Each panel must stay on screen at least {MIN_PANEL_DUR_S}s
+- Spread panels evenly — don't cluster them all at the start
 
 Output ONLY a JSON array like this — no explanation:
-[{{"page": 3, "at": 0.0}}, {{"page": 7, "at": 8.5}}, {{"page": 9, "at": 19.2}}]"""
+[{{"page": 3, "at": 0.0}}, {{"page": 7, "at": 2.5}}, {{"page": 9, "at": 5.0}}]"""
 
-    raw = _llm_call(prompt, max_tokens=250)
+    raw = _llm_call(prompt, max_tokens=600)
     assignments = []
 
     if raw:
