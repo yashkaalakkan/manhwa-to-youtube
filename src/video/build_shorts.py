@@ -179,14 +179,15 @@ def ai_select_panels(
         words = p.get("raw_text", "").split()
         if not words:
             continue
-        page_summaries.append(f"Page {p[\'page_index\']}: {\' \'.join(words[:12])}")
+        pg_idx   = p["page_index"]
+        pg_preview = " ".join(words[:12])
+        page_summaries.append(f"Page {pg_idx}: {pg_preview}")
 
     timed_words = ""
     if timing_words:
         sample = timing_words[::max(1, len(timing_words) // 25)]
-        timed_words = "\nTIMESTAMPS: " + ", ".join(
-            f\'{w["word"]}@{w["start"]:.1f}s\' for w in sample
-        )
+        parts = [f"{w['word']}@{w['start']:.1f}s" for w in sample]
+        timed_words = "\nTIMESTAMPS: " + ", ".join(parts)
 
     target_min = max(15, int(audio_duration / MAX_PANEL_DUR_S))
     target_max = max(25, int(audio_duration / MIN_PANEL_DUR_S))
