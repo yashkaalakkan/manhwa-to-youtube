@@ -241,7 +241,23 @@ STRICT RULES:
 - SHORT: aim for {WORDS_PER_SHORT} words (do not cut short — use full budget), end on a hook
 - FULL: continuous flowing narration, no cuts, no part labels
 - Use memory context for continuity — do NOT re-introduce already-known characters
-- Output ONLY the narration text. No labels, no preamble.
+
+OUTPUT FORMAT — output exactly this JSON structure, nothing else:
+{{
+  "narration": "<full narration text here>",
+  "page_timeline": [
+    {{"page": 3, "narration_word_start": 0,  "narration_word_end": 18}},
+    {{"page": 5, "narration_word_start": 18, "narration_word_end": 35}},
+    {{"page": 7, "narration_word_start": 35, "narration_word_end": 60}}
+  ]
+}}
+
+page_timeline rules:
+- Each entry = which page is being described during those narration word indices
+- narration_word_start/end are 0-based word indices into the narration string
+- Cover all words (first entry starts at 0, last entry ends at total word count)
+- Only include pages that actually have visual scene content worth showing
+- Skip pages that are only speech bubbles or title text
 
 Manhwa: "{manhwa}" | Episode: {episode} | Chapter: {chapter} | Type: {ctx}
 {lang}
@@ -249,7 +265,7 @@ Manhwa: "{manhwa}" | Episode: {episode} | Chapter: {chapter} | Type: {ctx}
 PANEL TEXT:
 {text}
 
-NARRATION:"""
+JSON OUTPUT:"""
 
 
 def narrate(gemini, groq_clients, pages, manhwa, episode, chapter, language,
@@ -273,12 +289,34 @@ def narrate(gemini, groq_clients, pages, manhwa, episode, chapter, language,
         text_override=groq_text
     )
 
-    narration = llm_call(gemini, groq_clients, gemini_prompt,
-                         max_tokens=400, groq_prompt=groq_prompt)
+    raw = llm_call(gemini, groq_clients, gemini_prompt,
+                   max_tokens=600, groq_prompt=groq_prompt)
+
+    # Parse JSON response — extract narration + page_timeline
+    page_timeline = []
+    narration     = raw  # fallback if JSON parse fails
+    try:
+        import json as _json
+        # Strip markdown fences if present
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```[a-z]*\n?", "", cleaned)
+            cleaned = re.sub(r"```$", "", cleaned.strip())
+        parsed        = _json.loads(cleaned)
+        narration     = parsed.get("narration", raw).strip()
+        page_timeline = parsed.get("page_timeline", [])
+        if page_timeline:
+            print(f"  [Script] Page timeline: {len(page_timeline)} segments")
+    except Exception:
+        # LLM returned plain text — no timeline, still usable
+        narration = raw.strip()
+        page_timeline = []
+
     words = narration.split()
     return {
         "narration":          narration,
         "estimated_duration": round(len(words) / WORDS_PER_SEC, 1),
+        "page_timeline":      page_timeline,
     }
 
 
@@ -391,6 +429,7 @@ def main():
             "pages":              [p["page_index"] for p in pages],
             "narration":          nar["narration"],
             "estimated_duration": nar["estimated_duration"],
+            "page_timeline":      nar.get("page_timeline", []),
             "metadata":           meta,
         }],
         "full_episode_chunk": {

@@ -77,6 +77,81 @@ def _llm_call(prompt: str, max_tokens: int = 300) -> Optional[str]:
     return None
 
 
+def panels_from_timeline(
+    panels: List[Path],
+    page_timeline: List[dict],
+    timing_words: List[dict],
+    audio_duration: float,
+) -> List[Tuple[Path, float]]:
+    """
+    Convert the page_timeline from scripts.json into (panel, duration) pairs.
+
+    page_timeline entries: {page, narration_word_start, narration_word_end}
+    timing_words entries:  {word, start, end}  — actual timestamps from stable-ts
+
+    For each timeline segment:
+    - Map narration_word_start → actual audio timestamp using timing_words
+    - Map narration_word_end   → actual audio timestamp
+    - Show the panel for that exact duration
+    - Pick the best panel from that page (avoid consecutive duplicates)
+    """
+    def page_of(path: Path) -> Optional[int]:
+        m = re.search(r"page_0*(\d+)", path.name)
+        return int(m.group(1)) if m else None
+
+    page_to_panels: Dict[int, List[Path]] = {}
+    for panel in panels:
+        pg = page_of(panel)
+        if pg is not None:
+            page_to_panels.setdefault(pg, []).append(panel)
+
+    n_words = len(timing_words)
+
+    def word_idx_to_time(idx: int) -> float:
+        if not timing_words:
+            return audio_duration * idx / max(n_words, 1)
+        idx = max(0, min(idx, n_words - 1))
+        return timing_words[idx]["start"]
+
+    result: List[Tuple[Path, float]] = []
+    last_panel = None
+
+    for i, seg in enumerate(page_timeline):
+        pg      = int(seg.get("page", 0))
+        w_start = int(seg.get("narration_word_start", 0))
+        w_end   = int(seg.get("narration_word_end",   n_words))
+
+        t_start = word_idx_to_time(w_start)
+        t_end   = word_idx_to_time(w_end) if w_end < n_words else audio_duration
+        dur     = max(MIN_PANEL_DUR_S, min(t_end - t_start, MAX_PANEL_DUR_S))
+
+        pg_panels = page_to_panels.get(pg, [])
+        if not pg_panels:
+            for offset in [1, -1, 2, -2, 3, -3]:
+                pg_panels = page_to_panels.get(pg + offset, [])
+                if pg_panels:
+                    break
+        if not pg_panels:
+            continue
+
+        # Avoid consecutive same panel — cycle through panels on this page
+        panel = pg_panels[0]
+        if panel == last_panel and len(pg_panels) > 1:
+            panel = pg_panels[1]
+        elif panel == last_panel:
+            continue
+
+        result.append((panel, dur))
+        last_panel = panel
+
+    if not result:
+        print("  [Panels] ⚠️  Timeline empty — falling back to proportional")
+        return _proportional_fallback(panels, audio_duration)
+
+    print(f"  [Panels] ✅ {len(result)} panels from narration timeline (exact page sync)")
+    return result
+
+
 def ai_select_panels(
     panels: List[Path],
     narration: str,
@@ -85,77 +160,49 @@ def ai_select_panels(
     timing_words: List[dict] = None,
 ) -> List[Tuple[Path, float]]:
     """
-    Ask the LLM two things in one call:
-      1. Which pages to show (relevant to narration, no text-only pages)
-      2. At what TIMESTAMP each page should appear (synced to voice)
-
-    The LLM receives the narration with word timestamps so it can say
-    "show page 5 at 12.3s when the narrator says 'Lloyd charged forward'".
-    This gives genuine voice-panel sync, not just equal-duration slots.
-
-    Returns (panel_path, duration_seconds) pairs where duration is the
-    time until the NEXT panel switch — derived from the AI-provided timestamps.
+    Fallback AI panel selection — only used when page_timeline is missing
+    from scripts.json (e.g. LLM returned plain text instead of JSON).
+    Asks the AI for page assignments with timestamps.
     """
-    # Build page summaries
+    def page_of(path: Path) -> Optional[int]:
+        m = re.search(r"page_0*(\d+)", path.name)
+        return int(m.group(1)) if m else None
+
+    page_to_panels: Dict[int, List[Path]] = {}
+    for i, panel in enumerate(panels):
+        pg = page_of(panel)
+        if pg is not None:
+            page_to_panels.setdefault(pg, []).append(panel)
+
     page_summaries = []
     for p in sorted(ocr_pages, key=lambda x: x["page_index"]):
         words = p.get("raw_text", "").split()
         if not words:
             continue
-        preview = " ".join(words[:15])
-        page_summaries.append(f"Page {p['page_index']}: {preview}")
+        page_summaries.append(f"Page {p[\'page_index\']}: {\' \'.join(words[:12])}")
 
-    def page_of(path: Path) -> Optional[int]:
-        m = re.search(r"page_0*(\d+)", path.name)
-        return int(m.group(1)) if m else None
-
-    page_to_panels: Dict[int, List[int]] = {}
-    for i, panel in enumerate(panels):
-        pg = page_of(panel)
-        if pg is not None:
-            page_to_panels.setdefault(pg, []).append(i + 1)
-
-    # Build a word-timestamp summary for the LLM
-    # Show every ~5th word with its timestamp so the LLM can anchor panels to speech
     timed_words = ""
     if timing_words:
-        sample = timing_words[::max(1, len(timing_words) // 30)]  # ~30 samples
-        timed_words = "\nNARRATION TIMESTAMPS (word → time in seconds):\n"
-        timed_words += ", ".join(
-            f'"{w["word"]}"@{w["start"]:.1f}s' for w in sample
+        sample = timing_words[::max(1, len(timing_words) // 25)]
+        timed_words = "\nTIMESTAMPS: " + ", ".join(
+            f\'{w["word"]}@{w["start"]:.1f}s\' for w in sample
         )
 
     target_min = max(15, int(audio_duration / MAX_PANEL_DUR_S))
     target_max = max(25, int(audio_duration / MIN_PANEL_DUR_S))
 
-    prompt = f"""You are a video editor syncing manga panels to a narration voiceover.
+    prompt = f"""Video editor syncing manga panels to narration ({audio_duration:.0f}s).
 
-TOTAL VIDEO DURATION: {audio_duration:.1f}s
-
-NARRATION:
-{narration[:500]}
+NARRATION: {narration[:400]}
 {timed_words}
 
-AVAILABLE PAGES (page number: first few words of text/dialogue):
-{chr(10).join(page_summaries[:25])}
+PAGES: {chr(10).join(page_summaries[:20])}
 
-TASK: Choose which pages to show and EXACTLY WHEN to show them (in seconds from start).
+Pick {target_min}–{target_max} panels with timestamps. Each panel 2–3.5s.
+JSON only: [{{"page":3,"at":0.0}},{{"page":7,"at":2.5}}]"""
 
-Rules:
-- TARGET: {target_min}–{target_max} panels total — each panel shows for ~2–3.5s, this keeps the video dynamic
-- If a page has good visual content, use it MULTIPLE TIMES at different timestamps as the narration revisits that scene
-- Only skip pages that are PURELY speech bubble text with zero visual scene content
-- No two consecutive identical pages
-- First panel must start at 0.0s
-- Last panel switch must be before {max(0, audio_duration - MIN_PANEL_DUR_S):.1f}s
-- Spread panels evenly — don't cluster them all at the start
-
-Output ONLY a JSON array like this — no explanation:
-[{{"page": 3, "at": 0.0}}, {{"page": 7, "at": 2.5}}, {{"page": 9, "at": 5.0}}]"""
-
-    raw = _llm_call(prompt, max_tokens=600)
+    raw = _llm_call(prompt, max_tokens=500)
     assignments = []
-
     if raw:
         m = re.search(r'\[.*?\]', raw, re.DOTALL)
         if m:
@@ -163,47 +210,40 @@ Output ONLY a JSON array like this — no explanation:
                 parsed = json.loads(m.group(0))
                 if parsed and isinstance(parsed[0], dict) and "page" in parsed[0]:
                     assignments = parsed
-                    print(f"  [PanelAI] AI assigned {len(assignments)} panels with timestamps")
             except Exception:
                 pass
 
     if not assignments:
-        print("  [PanelAI] ⚠️  Could not parse AI response — falling back to proportional")
         return _proportional_fallback(panels, audio_duration)
 
-    # Convert assignments → (panel_path, duration) pairs
     result = []
-    last_panel_idx = None
+    last_panel = None
+    for i, a in enumerate(assignments):
+        pg  = int(a.get("page", 0))
+        t_s = float(a.get("at", 0.0))
+        t_e = float(assignments[i+1]["at"]) if i+1 < len(assignments) else audio_duration
+        dur = max(MIN_PANEL_DUR_S, min(t_e - t_s, MAX_PANEL_DUR_S))
 
-    for i, assignment in enumerate(assignments):
-        pg_num = int(assignment.get("page", 0))
-        t_start = float(assignment.get("at", 0.0))
-        t_end = float(assignments[i + 1]["at"]) if i + 1 < len(assignments) else audio_duration
-        duration = max(MIN_PANEL_DUR_S, min(t_end - t_start, MAX_PANEL_DUR_S))
-
-        pg_panels = page_to_panels.get(pg_num, [])
+        pg_panels = page_to_panels.get(pg, [])
         if not pg_panels:
-            for offset in [1, -1, 2, -2]:
-                pg_panels = page_to_panels.get(pg_num + offset, [])
-                if pg_panels:
-                    break
+            for offset in [1,-1,2,-2]:
+                pg_panels = page_to_panels.get(pg+offset, [])
+                if pg_panels: break
         if not pg_panels:
             continue
 
-        idx = pg_panels[0] - 1
-        if idx == last_panel_idx and len(pg_panels) > 1:
-            idx = pg_panels[1] - 1
-        elif idx == last_panel_idx:
-            continue  # skip true duplicate with no alternative
-
-        result.append((panels[idx], duration))
-        last_panel_idx = idx
+        panel = pg_panels[0]
+        if panel == last_panel and len(pg_panels) > 1:
+            panel = pg_panels[1]
+        elif panel == last_panel:
+            continue
+        result.append((panel, dur))
+        last_panel = panel
 
     if not result:
-        print("  [PanelAI] ⚠️  No valid panels built — falling back")
         return _proportional_fallback(panels, audio_duration)
 
-    print(f"  [PanelAI] ✅ {len(result)} panels, timestamps from AI (voice-synced)")
+    print(f"  [Panels] ✅ {len(result)} panels from AI fallback")
     return result
 
 
@@ -343,18 +383,30 @@ def main():
     audio_path  = Path(args.audio_dir) / "short_part_01.wav"
     output_path = output_dir / f"short_ep{args.episode:02d}_ch{args.chapter:02d}.mp4"
 
-    narration = scripts["shorts"][0]["narration"]
+    narration     = scripts["shorts"][0]["narration"]
+    page_timeline = scripts["shorts"][0].get("page_timeline", [])
 
     print(f"\n[Short] Building chapter {args.chapter} short → {output_path.name}")
 
-    # AI panel selection
-    panels_with_durations = ai_select_panels(
-        panels         = panels,
-        narration      = narration,
-        ocr_pages      = ocr_pages,
-        audio_duration = timing["duration"],
-        timing_words   = timing["words"],
-    )
+    if page_timeline:
+        # Use the page timeline generated alongside the narration — exact sync
+        print(f"[Short] Using page_timeline from scripts.json ({len(page_timeline)} segments)")
+        panels_with_durations = panels_from_timeline(
+            panels        = panels,
+            page_timeline = page_timeline,
+            timing_words  = timing["words"],
+            audio_duration = timing["duration"],
+        )
+    else:
+        # Fallback — LLM returned plain text instead of JSON
+        print("[Short] No page_timeline in scripts.json — using AI fallback")
+        panels_with_durations = ai_select_panels(
+            panels         = panels,
+            narration      = narration,
+            ocr_pages      = ocr_pages,
+            audio_duration = timing["duration"],
+            timing_words   = timing["words"],
+        )
 
     build_short(
         panels_with_durations = panels_with_durations,
