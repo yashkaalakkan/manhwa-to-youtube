@@ -120,8 +120,7 @@ def build_full_episode(
         ]
 
         ass_path = tmp / "subs.ass"
-        generate_ass_subtitles(offset_words, COVER_DURATION_S + content_dur, ass_path,
-                               font_size=FONT_SIZE_FULL, width=FULL_WIDTH, height=FULL_HEIGHT)
+        ass_path.write_text("", encoding="utf-8")
         print(f"[FullEp] Subtitles: {len(offset_words)} words")
 
         pool = ANIMATIONS * (n_pages // len(ANIMATIONS) + 1)
@@ -133,11 +132,11 @@ def build_full_episode(
             page_images=page_dsts,
             cover_image=cover_dst,
             audio_path=audio_path,
-            ass_path=ass_path,
             output_path=output_path,
             animations=animations,
             cover_duration_s=COVER_DURATION_S,
             content_duration_s=content_dur,
+            subtitle_words=offset_words,
             width=FULL_WIDTH,
             height=FULL_HEIGHT,
         )

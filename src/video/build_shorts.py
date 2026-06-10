@@ -148,6 +148,22 @@ def panels_from_timeline(
         print("  [Panels] ⚠️  Timeline empty — falling back to proportional")
         return _proportional_fallback(panels, audio_duration)
 
+    # If too few panels for the audio duration, expand by cycling through them
+    # until we reach the target count (one panel per ~2.5s)
+    target = max(len(result), int(audio_duration / 2.5))
+    if len(result) < target:
+        expanded = []
+        for i in range(target):
+            panel, dur = result[i % len(result)]
+            # Avoid consecutive duplicates while cycling
+            if expanded and panel == expanded[-1][0] and len(result) > 1:
+                panel, dur = result[(i + 1) % len(result)]
+            expanded.append((panel, dur))
+        # Recalculate durations evenly across expanded set
+        per = max(MIN_PANEL_DUR_S, min(audio_duration / len(expanded), MAX_PANEL_DUR_S))
+        result = [(p, per) for p, _ in expanded]
+        print(f"  [Panels] Expanded {len(result) // target * target} → {len(result)} panels (~{per:.1f}s each)")
+
     print(f"  [Panels] ✅ {len(result)} panels from narration timeline (exact page sync)")
     return result
 
@@ -292,10 +308,6 @@ def build_short(
         avg = audio_duration / max(n, 1)
         print(f"  [Short] Ch{chapter}: {n} panels | {audio_duration:.1f}s audio | ~{avg:.1f}s/panel")
 
-        # Pass word timings to build_video_ffmpeg via sidecar attribute
-        # (avoids changing the function signature across all callers)
-        ass_path = tmp / "subs.ass"
-        ass_path.write_text("", encoding="utf-8")
         # Offset word timestamps by cover duration so subtitles start after cover
         offset_words = [
             {**w,
@@ -303,7 +315,6 @@ def build_short(
              "end":   round(w["end"]   + COVER_DURATION_S, 3)}
             for w in timing_words
         ]
-        ass_path._words = offset_words  # picked up by build_video_ffmpeg
 
         pool       = ANIMATIONS.copy()
         random.shuffle(pool)
@@ -313,8 +324,8 @@ def build_short(
             page_images        = page_dsts,
             page_durations     = page_durs,
             cover_image        = cover_dst,
+            subtitle_words     = offset_words,
             audio_path         = audio_path,
-            ass_path           = ass_path,
             output_path        = output_path,
             animations         = animations,
             cover_duration_s   = COVER_DURATION_S,
@@ -425,4 +436,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main() 

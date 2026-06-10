@@ -361,12 +361,13 @@ def build_video_ffmpeg(
     page_images: List[Path],
     cover_image: Path,
     audio_path: Path,
-    ass_path: Path,           # kept for build_shorts compat — now ignored (drawtext used)
     output_path: Path,
-    animations: List[str],    # kept for compat — transitions removed (concat used)
+    animations: List[str],
     cover_duration_s: float = 3.0,
     content_duration_s: float = 60.0,
     page_durations: Optional[List[float]] = None,
+    subtitle_words: list = None,   # word timing dicts {word, start, end} for drawtext
+    ass_path: Path = None,         # ignored — kept for backward compat only
     fade_dur: float = 0.3,
     width: int = SHORT_WIDTH,
     height: int = SHORT_HEIGHT,
@@ -430,12 +431,8 @@ def build_video_ffmpeg(
 
     # Final pass: concat video clips + add audio
     audio_fade_st = max(0.0, total_dur - fade_dur)
-    # Build drawtext subtitle filter from word timings in ass_path's sibling
-    # We reuse the word timings written by build_shorts via a sidecar approach:
-    # build_shorts passes timing_words → stored as _subtitle_words attr on ass_path
-    subtitle_words = getattr(ass_path, "_words", [])
     subtitle_vf = build_drawtext_filters(
-        subtitle_words, total_dur, width, height
+        subtitle_words or [], total_dur, width, height
     ) if subtitle_words else "null"
 
     cmd = [
@@ -823,110 +820,3 @@ def build_drawtext_filters(
             x += ww + spacing
 
     return ",".join(filters)
-
-def build_video_ffmpeg(
-    page_images: List[Path],
-    cover_image: Path,
-    audio_path: Path,
-    ass_path: Path,
-    output_path: Path,
-    animations: List[str],
-    cover_duration_s: float = 3.0,
-    content_duration_s: float = 60.0,
-    page_durations: Optional[List[float]] = None,   # per-panel durations from semantic selector
-    fade_dur: float = 0.4,
-    width: int = SHORT_WIDTH,
-    height: int = SHORT_HEIGHT,
-) -> None:
-    """
-    Build the video so total duration = cover_duration_s + content_duration_s exactly.
-    If page_durations is provided (from semantic selector), use those per-panel times.
-    Otherwise distribute content_duration_s evenly across all panels.
-    Audio fade anchored to audio end so voice is never clipped.
-    """
-    n_pages = len(page_images)
-
-    if page_durations and len(page_durations) == n_pages:
-        panel_durs = page_durations
-    else:
-        per = max(1.0, min(content_duration_s / max(n_pages, 1), 6.0))
-        panel_durs = [per] * n_pages
-
-    # Use the smallest panel duration to set transition length
-    min_dur   = min(panel_durs) if panel_durs else 1.0
-    trans_dur = min(0.3, min_dur * 0.15)
-
-    all_images = [cover_image] + list(page_images)
-    durations  = [cover_duration_s] + panel_durs
-    total_segs = len(all_images)
-
-    # Total video duration matches audio exactly
-    total_dur      = cover_duration_s + content_duration_s
-    audio_fade_st  = max(0.0, total_dur - fade_dur)
-    video_fade_st  = max(0.0, total_dur - fade_dur)
-
-    inputs = []
-    for img, dur in zip(all_images, durations):
-        inputs += ["-loop", "1", "-t", f"{dur + trans_dur:.3f}", "-i", str(img)]
-    inputs += ["-i", str(audio_path)]
-    audio_idx = total_segs
-
-    filter_parts = []
-    for idx in range(total_segs):
-        lbl = f"s{idx}"
-        filter_parts.append(
-            f"[{idx}:v]scale={width}:{height}:"
-            f"force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:0xFFFFFF,"
-            f"setsar=1,fps={FPS}[{lbl}]"
-        )
-
-    if total_segs == 1:
-        filter_parts.append("[s0]copy[xout]")
-    else:
-        prev_label = "s0"
-        offset     = durations[0] - trans_dur
-        trans_list = animations if animations else TRANSITIONS
-        for i in range(1, total_segs):
-            out_label = "xout" if i == total_segs - 1 else f"x{i}"
-            trans     = trans_list[(i - 1) % len(trans_list)]
-            filter_parts.append(
-                f"[{prev_label}][s{i}]xfade=transition={trans}"
-                f":duration={trans_dur:.3f}:offset={offset:.3f}[{out_label}]"
-            )
-            prev_label = out_label
-            offset    += durations[i] - trans_dur
-
-    ass_safe = str(ass_path).replace("\\", "/").replace(":", "\\:")
-    filter_parts.append(f"[xout]ass='{ass_safe}'[subv]")
-    filter_parts.append(
-        f"[subv]fade=t=in:st=0:d={fade_dur},"
-        f"fade=t=out:st={video_fade_st:.3f}:d={fade_dur}[fv]"
-    )
-    filter_parts.append(
-        f"[{audio_idx}:a]afade=t=in:st=0:d={fade_dur},"
-        f"afade=t=out:st={audio_fade_st:.3f}:d={fade_dur}[fa]"
-    )
-
-    cmd = (
-        ["ffmpeg", "-y"]
-        + inputs
-        + [
-            "-filter_complex", "; ".join(filter_parts),
-            "-map", "[fv]",
-            "-map", "[fa]",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "22",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-t", f"{total_dur:.3f}",   # hard duration cap = cover + audio
-            "-movflags", "+faststart",
-            str(output_path),
-        ]
-    )
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg failed:\n{result.stderr[-4000:]}")
