@@ -251,19 +251,18 @@ def build_short(
         avg = audio_duration / max(n, 1)
         print(f"  [Short] Ch{chapter}: {n} panels | {audio_duration:.1f}s audio | ~{avg:.1f}s/panel")
 
+        # Pass word timings to build_video_ffmpeg via sidecar attribute
+        # (avoids changing the function signature across all callers)
+        ass_path = tmp / "subs.ass"
+        ass_path.write_text("", encoding="utf-8")
+        # Offset word timestamps by cover duration so subtitles start after cover
         offset_words = [
             {**w,
              "start": round(w["start"] + COVER_DURATION_S, 3),
              "end":   round(w["end"]   + COVER_DURATION_S, 3)}
             for w in timing_words
         ]
-
-        ass_path = tmp / "subs.ass"
-        generate_ass_subtitles(
-            offset_words,
-            COVER_DURATION_S + audio_duration,
-            ass_path,
-        )
+        ass_path._words = offset_words  # picked up by build_video_ffmpeg
 
         pool       = ANIMATIONS.copy()
         random.shuffle(pool)
