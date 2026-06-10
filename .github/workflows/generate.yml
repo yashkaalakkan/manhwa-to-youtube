@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       start_chapter:
-        description: "Starting chapter number for Chapter 1 link (e.g. 3 means Ch1=3, Ch2=4, Ch3=5...)"
+        description: "Starting chapter number for Ch1 link (e.g. 16 means Ch1=16, Ch2=17...)"
         required: false
         default: "1"
         type: string
@@ -114,6 +114,7 @@ jobs:
       - name: 📖 Prepare Chapter 1
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
@@ -134,6 +135,7 @@ jobs:
         if: github.event.inputs.drive_file_link_2 != ''
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
@@ -154,6 +156,7 @@ jobs:
         if: github.event.inputs.drive_file_link_3 != ''
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
@@ -174,6 +177,7 @@ jobs:
         if: github.event.inputs.drive_file_link_4 != ''
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
@@ -194,6 +198,7 @@ jobs:
         if: github.event.inputs.drive_file_link_5 != ''
         env:
           GDRIVE_API_KEY: ${{ secrets.GDRIVE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
@@ -217,6 +222,7 @@ jobs:
 
       - name: 🎬 Build videos
         env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
           GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
