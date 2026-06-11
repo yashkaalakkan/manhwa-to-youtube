@@ -93,10 +93,18 @@ jobs:
           RCLONE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
         run: |
           mkdir -p ~/.config/rclone
-          printf '[gdrive]\ntype = drive\nclient_id = %s\nclient_secret = %s\nscope = drive.readonly\ntoken = {"access_token":"","token_type":"Bearer","refresh_token":"%s","expiry":"2000-01-01T00:00:00Z"}\n' \
-            "$RCLONE_CLIENT_ID" "$RCLONE_CLIENT_SECRET" "$RCLONE_REFRESH_TOKEN" \
-            > ~/.config/rclone/rclone.conf
-          echo "rclone.conf written"
+          cat > ~/.config/rclone/rclone.conf << RCLONE_EOF
+            [gdrive]
+            type = drive
+            client_id = ${RCLONE_CLIENT_ID}
+            client_secret = ${RCLONE_CLIENT_SECRET}
+            scope = drive.readonly
+            token = {"access_token":"","token_type":"Bearer","refresh_token":"${RCLONE_REFRESH_TOKEN}","expiry":"2000-01-01T00:00:00Z"}
+            RCLONE_EOF
+                    echo "--- rclone.conf contents (token masked) ---"
+                    sed 's/"refresh_token":"[^"]*"/"refresh_token":"***"/' ~/.config/rclone/rclone.conf
+                    echo "---"
+                    rclone listremotes
 
       - name: 🎬 Download, concat & upload
         env:
