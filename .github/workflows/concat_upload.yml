@@ -1,0 +1,124 @@
+name: 🎬 Concat & Upload to YouTube
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_link_1:
+        description: "Drive link — Video 1 (required, plays first)"
+        required: true
+        type: string
+      video_link_2:
+        description: "Drive link — Video 2 (required)"
+        required: true
+        type: string
+      video_link_3:
+        description: "Drive link — Video 3 (optional)"
+        required: false
+        default: ""
+        type: string
+      video_link_4:
+        description: "Drive link — Video 4 (optional)"
+        required: false
+        default: ""
+        type: string
+      video_link_5:
+        description: "Drive link — Video 5 (optional)"
+        required: false
+        default: ""
+        type: string
+      title:
+        description: "YouTube title"
+        required: true
+        type: string
+      description:
+        description: "YouTube description"
+        required: false
+        default: "Watch now! #manhwa #anime #webtoon"
+        type: string
+      tags:
+        description: "Comma-separated tags (e.g. manhwa,anime,webtoon)"
+        required: false
+        default: "manhwa,anime,webtoon,shorts"
+        type: string
+      output_type:
+        description: "Video type — 'full' (regular) or 'shorts' (adds #Shorts)"
+        required: false
+        default: "full"
+        type: choice
+        options:
+          - full
+          - shorts
+      publish_hours_from_now:
+        description: "Hours from now to publish (default: 2)"
+        required: false
+        default: "2"
+        type: string
+      gap_seconds:
+        description: "Black gap between clips in seconds (default: 0.9)"
+        required: false
+        default: "0.9"
+        type: string
+
+jobs:
+  concat-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 📥 Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 📦 Install dependencies
+        run: |
+          sudo apt-get install -y ffmpeg
+          pip install --upgrade pip
+          pip install \
+            requests \
+            google-api-python-client \
+            google-auth \
+            google-auth-httplib2 \
+            google-auth-oauthlib
+
+      - name: 🎬 Download, concat & upload
+        env:
+          GDRIVE_API_KEY:          ${{ secrets.GDRIVE_API_KEY }}
+          YOUTUBE_CLIENT_ID:       ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET:   ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN:   ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: |
+          # Build the links list — only pass non-empty ones
+          LINKS="${{ github.event.inputs.video_link_1 }} ${{ github.event.inputs.video_link_2 }}"
+
+          if [ -n "${{ github.event.inputs.video_link_3 }}" ]; then
+            LINKS="$LINKS ${{ github.event.inputs.video_link_3 }}"
+          fi
+          if [ -n "${{ github.event.inputs.video_link_4 }}" ]; then
+            LINKS="$LINKS ${{ github.event.inputs.video_link_4 }}"
+          fi
+          if [ -n "${{ github.event.inputs.video_link_5 }}" ]; then
+            LINKS="$LINKS ${{ github.event.inputs.video_link_5 }}"
+          fi
+
+          python src/upload/concat_and_upload.py \
+            --links $LINKS \
+            --title       "${{ github.event.inputs.title }}" \
+            --description "${{ github.event.inputs.description }}" \
+            --tags        "${{ github.event.inputs.tags }}" \
+            --output-type "${{ github.event.inputs.output_type }}" \
+            --publish-hours-from-now "${{ github.event.inputs.publish_hours_from_now }}" \
+            --gap-seconds "${{ github.event.inputs.gap_seconds }}" \
+            --output-dir  "./output"
+
+      - name: 📋 Save upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: concat-upload-log
+          path: output/concat_upload_log.json
+          retention-days: 3
