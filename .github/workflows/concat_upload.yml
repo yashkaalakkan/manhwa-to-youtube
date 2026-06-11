@@ -93,18 +93,10 @@ jobs:
           RCLONE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
         run: |
           mkdir -p ~/.config/rclone
-          python3 - << 'PYEOF'
-            import os, json
-            conf = f"""[gdrive]
-            type = drive
-            client_id = {os.environ['RCLONE_CLIENT_ID']}
-            client_secret = {os.environ['RCLONE_CLIENT_SECRET']}
-            scope = drive.readonly
-            token = {json.dumps({"access_token": "", "token_type": "Bearer", "refresh_token": os.environ['RCLONE_REFRESH_TOKEN'], "expiry": "2000-01-01T00:00:00Z"})}
-            """
-            open(os.path.expanduser("~/.config/rclone/rclone.conf"), "w").write(conf)
-            print("rclone.conf written")
-            PYEOF
+          printf '[gdrive]\ntype = drive\nclient_id = %s\nclient_secret = %s\nscope = drive.readonly\ntoken = {"access_token":"","token_type":"Bearer","refresh_token":"%s","expiry":"2000-01-01T00:00:00Z"}\n' \
+            "$RCLONE_CLIENT_ID" "$RCLONE_CLIENT_SECRET" "$RCLONE_REFRESH_TOKEN" \
+            > ~/.config/rclone/rclone.conf
+          echo "rclone.conf written"
 
       - name: 🎬 Download, concat & upload
         env:
