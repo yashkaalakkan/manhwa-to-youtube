@@ -26,7 +26,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
-import gdown
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
@@ -49,76 +48,48 @@ def extract_file_id(link: str) -> str:
     raise ValueError(f"Cannot extract file ID from: {link}")
 
 
-def download_from_drive(file_id: str, dest: Path, max_retries: int = 5) -> None:
+def download_from_drive(file_id: str, dest: Path, max_retries: int = 3) -> None:
     """
-    Download a file from Google Drive using gdown, which reliably handles
-    large files, confirmation pages, and quota warnings.
-    Falls back to Drive API v3 if GDRIVE_API_KEY is set.
+    Download a file from Google Drive using rclone, which uses the official
+    Drive API with OAuth — bypasses public download throttling entirely.
+    Requires rclone configured with a [gdrive] remote in the environment.
     """
     import time
+    import shutil
 
-    url = f"https://drive.google.com/uc?id={file_id}"
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"  [gdown] Attempt {attempt}/{max_retries}...")
-            result = gdown.download(url, str(dest), quiet=False, fuzzy=True)
-            if result and Path(result).exists() and Path(result).stat().st_size > 10_000:
-                size_mb = Path(result).stat().st_size / 1024 / 1024
-                print(f"\n  ✅ Downloaded: {dest.name} ({size_mb:.1f} MB)")
-                return
-            else:
-                print(f"  ⚠️  gdown attempt {attempt} produced empty/missing file, retrying...")
-        except Exception as e:
-            print(f"  ⚠️  gdown attempt {attempt} failed: {e}")
-        if attempt < max_retries:
-            time.sleep(5 * attempt)
+    if not shutil.which("rclone"):
+        raise RuntimeError("rclone is not installed. Add it to the workflow apt-get install step.")
 
-    # Fallback: Drive API v3 with Range-resume
-    api_key = os.environ.get("GDRIVE_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError(
-            f"All {max_retries} gdown attempts failed and no GDRIVE_API_KEY set. "
-            "Check file sharing permissions."
-        )
-
-    print(f"  Falling back to Drive API v3...")
-    api_url    = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
-    session    = requests.Session()
-    downloaded = 0
+    remote_path = f"gdrive://{file_id}"   # rclone accepts file IDs directly with --drive-root-folder-id
 
     for attempt in range(1, max_retries + 1):
-        headers = {"Range": f"bytes={downloaded}-"} if downloaded > 0 else {}
-        try:
-            resp = session.get(api_url, stream=True, headers=headers, timeout=(15, 60))
-            if resp.status_code == 403:
-                raise PermissionError(f"Access denied for file {file_id}.")
-            resp.raise_for_status()
-            total = int(resp.headers.get("Content-Length", 0)) + downloaded
-            mode  = "ab" if downloaded > 0 else "wb"
-            with open(dest, mode) as f:
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total:
-                            pct = int(downloaded / total * 100)
-                            print(f"  Downloading... {pct}%  ({downloaded//1024//1024} MB)",
-                                  end="\r", flush=True)
-            break
-        except (requests.exceptions.ReadTimeout,
-                requests.exceptions.ChunkedEncodingError,
-                requests.exceptions.ConnectionError) as e:
-            print(f"\n  ⚠️  Stalled at {downloaded//1024//1024} MB: {e}")
-            if attempt >= max_retries:
-                raise RuntimeError(f"Download failed after {max_retries} attempts") from e
-            time.sleep(5 * attempt)
+        print(f"  [rclone] Attempt {attempt}/{max_retries}: downloading {dest.name}...")
+        cmd = [
+            "rclone", "copyto",
+            f"gdrive:",                        # remote name from rclone.conf
+            str(dest),
+            "--drive-root-folder-id", file_id, # treat the file ID as root
+            "--drive-acknowledge-abuse",        # download even if Drive flagged the file
+            "--retries", "3",
+            "--retries-sleep", "10s",
+            "--stats", "5s",                   # print transfer stats every 5s
+            "--stats-one-line",
+            "--progress",
+            "-v",
+        ]
+        result = subprocess.run(cmd, text=True)
+        if result.returncode == 0 and dest.exists() and dest.stat().st_size > 10_000:
+            size_mb = dest.stat().st_size / 1024 / 1024
+            print(f"  ✅ Downloaded: {dest.name} ({size_mb:.1f} MB)")
+            return
+        else:
+            print(f"  ⚠️  rclone attempt {attempt} failed (exit {result.returncode})")
+            if dest.exists():
+                dest.unlink()   # remove partial file before retry
+            if attempt < max_retries:
+                time.sleep(10 * attempt)
 
-    if downloaded < 10_000:
-        raise RuntimeError(
-            f"Downloaded only {downloaded} bytes — likely an HTML page. "
-            "Check sharing settings and GDRIVE_API_KEY."
-        )
-    print(f"\n  ✅ Downloaded: {dest.name} ({downloaded / 1024 / 1024:.1f} MB)")
+    raise RuntimeError(f"rclone failed to download file ID {file_id} after {max_retries} attempts")
 
 
 

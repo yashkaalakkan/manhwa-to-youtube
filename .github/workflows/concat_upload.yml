@@ -62,7 +62,7 @@ on:
 jobs:
   concat-and-upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: 📥 Checkout repo
@@ -77,15 +77,26 @@ jobs:
       - name: 📦 Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --fix-missing ffmpeg
+          sudo apt-get install -y --fix-missing ffmpeg rclone
           pip install --upgrade pip
           pip install \
-            "gdown >= 4.7.1" \
             requests \
             google-api-python-client \
             google-auth \
             google-auth-httplib2 \
             google-auth-oauthlib
+
+      - name: 🔧 Configure rclone
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf << EOF
+          [gdrive]
+          type = drive
+          client_id = ${{ secrets.YOUTUBE_CLIENT_ID }}
+          client_secret = ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          token = {"access_token":"","token_type":"Bearer","refresh_token":"${{ secrets.YOUTUBE_REFRESH_TOKEN }}","expiry":"2000-01-01T00:00:00Z"}
+          scope = drive.readonly
+          EOF
 
       - name: 🎬 Download, concat & upload
         env:
