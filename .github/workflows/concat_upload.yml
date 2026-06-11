@@ -87,16 +87,24 @@ jobs:
             google-auth-oauthlib
 
       - name: 🔧 Configure rclone
+        env:
+          RCLONE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          RCLONE_CLIENT_ID:     ${{ secrets.YOUTUBE_CLIENT_ID }}
+          RCLONE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
         run: |
           mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf << EOF
-          [gdrive]
-          type = drive
-          client_id = ${{ secrets.YOUTUBE_CLIENT_ID }}
-          client_secret = ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          token = {"access_token":"","token_type":"Bearer","refresh_token":"${{ secrets.YOUTUBE_REFRESH_TOKEN }}","expiry":"2000-01-01T00:00:00Z"}
-          scope = drive.readonly
-          EOF
+          python3 - << 'PYEOF'
+import os, json
+conf = f"""[gdrive]
+type = drive
+client_id = {os.environ['RCLONE_CLIENT_ID']}
+client_secret = {os.environ['RCLONE_CLIENT_SECRET']}
+scope = drive.readonly
+token = {json.dumps({"access_token": "", "token_type": "Bearer", "refresh_token": os.environ['RCLONE_REFRESH_TOKEN'], "expiry": "2000-01-01T00:00:00Z"})}
+"""
+open(os.path.expanduser("~/.config/rclone/rclone.conf"), "w").write(conf)
+print("rclone.conf written")
+PYEOF
 
       - name: 🎬 Download, concat & upload
         env:
