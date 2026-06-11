@@ -48,57 +48,90 @@ def extract_file_id(link: str) -> str:
     raise ValueError(f"Cannot extract file ID from: {link}")
 
 
-def download_from_drive(file_id: str, dest: Path) -> None:
+def _build_download_url(file_id: str, api_key: str) -> str:
+    if api_key:
+        return f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
+    return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+
+def download_from_drive(file_id: str, dest: Path, max_retries: int = 5) -> None:
     """
-    Download a file from Google Drive using the API key.
-    Falls back to cookie-confirm method if API key is not set.
+    Download a file from Google Drive with resume-on-stall support.
+    - Uses Drive API v3 if GDRIVE_API_KEY is set, else falls back to uc?export=download.
+    - Detects stalled downloads (no data for 60s) and resumes using HTTP Range requests.
+    - Retries up to max_retries times before giving up.
     """
     api_key = os.environ.get("GDRIVE_API_KEY", "").strip()
+    url     = _build_download_url(file_id, api_key)
+
     session = requests.Session()
 
-    if api_key:
-        # Preferred: Drive API v3 direct download
-        url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
-        resp = session.get(url, stream=True, timeout=300)
-        if resp.status_code == 403:
-            raise PermissionError(
-                f"Access denied for file {file_id}. "
-                "Ensure the file is shared as 'Anyone with the link' and "
-                "the Drive API is enabled for your API key."
-            )
-    else:
-        # Fallback: direct uc download + confirmation token
-        url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        resp = session.get(url, stream=True, timeout=60)
+    # For non-API-key path, resolve confirmation token once upfront
+    if not api_key:
+        resp = session.get(url, stream=True, timeout=30)
         if "Content-Disposition" not in resp.headers:
-            token = None
-            for key, val in resp.cookies.items():
-                if key.startswith("download_warning"):
-                    token = val
-                    break
+            token = next(
+                (v for k, v in resp.cookies.items() if k.startswith("download_warning")),
+                None,
+            )
             if token:
-                resp = session.get(url, params={"confirm": token}, stream=True, timeout=300)
+                url = url + f"&confirm={token}"
+        resp.close()
 
-    resp.raise_for_status()
-
-    total = int(resp.headers.get("Content-Length", 0))
     downloaded = 0
-    with open(dest, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total:
-                    pct = int(downloaded / total * 100)
-                    print(f"  Downloading... {pct}%", end="\r")
+    attempt    = 0
+
+    while attempt < max_retries:
+        attempt += 1
+        headers  = {"Range": f"bytes={downloaded}-"} if downloaded > 0 else {}
+
+        try:
+            resp = session.get(url, stream=True, headers=headers,
+                               timeout=(15, 60))  # (connect, read) timeouts
+
+            if resp.status_code == 403:
+                raise PermissionError(
+                    f"Access denied for file {file_id}. "
+                    "Ensure the file is shared as 'Anyone with the link' "
+                    "and the Drive API is enabled for your API key."
+                )
+            if resp.status_code not in (200, 206):
+                resp.raise_for_status()
+
+            total = int(resp.headers.get("Content-Length", 0)) + downloaded
+
+            mode = "ab" if downloaded > 0 else "wb"
+            with open(dest, mode) as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            pct = int(downloaded / total * 100)
+                            print(f"  Downloading... {pct}%  ({downloaded//1024//1024} MB)", end="\r", flush=True)
+
+            # Successful finish
+            break
+
+        except (requests.exceptions.ReadTimeout,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError) as e:
+            print(f"\n  ⚠️  Download stalled at {downloaded//1024//1024} MB "
+                  f"(attempt {attempt}/{max_retries}): {e}")
+            if attempt >= max_retries:
+                raise RuntimeError(
+                    f"Download failed after {max_retries} attempts at {downloaded//1024//1024} MB"
+                ) from e
+            print(f"  Resuming from {downloaded//1024//1024} MB...")
+            import time; time.sleep(3 * attempt)   # back-off: 3s, 6s, 9s …
 
     if downloaded < 10_000:
         raise RuntimeError(
-            f"Downloaded only {downloaded} bytes — likely an HTML error page, not a video. "
+            f"Downloaded only {downloaded} bytes — likely an HTML error page. "
             "Check sharing settings and GDRIVE_API_KEY."
         )
 
-    print(f"  Downloaded: {dest.name} ({downloaded / 1024 / 1024:.1f} MB)    ")
+    print(f"\n  ✅ Downloaded: {dest.name} ({downloaded / 1024 / 1024:.1f} MB)    ")
 
 
 # ── Subtitle extraction ───────────────────────────────────────────────────────
